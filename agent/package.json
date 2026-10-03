@@ -1,0 +1,19 @@
+{
+  "name": "wa2sip-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "WhatsApp Web driver for wa2sip (one process per linked account)",
+  "main": "index.js",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "check": "node --check index.js && node --check page.js && node --check loopback.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "qrcode": "1.5.4",
+    "whatsapp-web.js": "https://github.com/wwebjs/whatsapp-web.js/archive/064a3d5a5a3dce1281a6a12740b5a7051339d154.tar.gz"
+  }
+}

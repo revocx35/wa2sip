@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>wa2sip</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div id="auth" class="auth hidden">
+    <form id="auth-form" class="auth-card">
+      <div class="brand big"><span class="logo"></span>wa2sip</div>
+      <p id="auth-hint" class="muted"></p>
+      <label>Admin password<input id="auth-password" type="password" autocomplete="current-password" required></label>
+      <label id="auth-confirm-wrap" class="hidden">Repeat password<input id="auth-confirm" type="password" autocomplete="new-password"></label>
+      <div id="auth-error" class="error"></div>
+      <button class="btn primary" type="submit" id="auth-submit">Sign in</button>
+    </form>
+  </div>
+
+  <div id="app" class="layout hidden">
+    <aside class="sidebar">
+      <div class="brand"><span class="logo"></span>wa2sip</div>
+      <nav id="nav">
+        <a href="#/" data-page="dashboard"><i class="ico ico-home"></i>Dashboard</a>
+        <a href="#/whatsapp" data-page="whatsapp"><i class="ico ico-chat"></i>WhatsApp</a>
+        <a href="#/pbx" data-page="pbx"><i class="ico ico-phone"></i>PBX &amp; extensions</a>
+        <a href="#/bridges" data-page="bridges"><i class="ico ico-link"></i>Bridges</a>
+        <a href="#/calls" data-page="calls"><i class="ico ico-list"></i>Calls</a>
+        <a href="#/voices" data-page="voices"><i class="ico ico-voice"></i>Voices</a>
+        <a href="#/logs" data-page="logs"><i class="ico ico-log"></i>Logs</a>
+        <a href="#/settings" data-page="settings"><i class="ico ico-gear"></i>Settings</a>
+      </nav>
+      <div class="sidebar-foot">
+        <span id="version" class="muted"></span>
+        <button id="logout" class="btn ghost small">Sign out</button>
+      </div>
+    </aside>
+    <main id="main"></main>
+  </div>
+
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <header><h2 id="modal-title"></h2><button class="icon-btn" data-close aria-label="Close">&times;</button></header>
+      <div id="modal-body"></div>
+    </div>
+  </div>
+  <div id="toasts"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

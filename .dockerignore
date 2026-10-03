@@ -1,0 +1,13 @@
+.git
+.github
+**/node_modules
+**/__pycache__
+.pytest_cache
+data
+docs
+tests
+tools/*
+!tools/audio_loopback.py
+*.md
+.env
+CLAUDE.local.md

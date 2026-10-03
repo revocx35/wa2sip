@@ -1,0 +1,16 @@
+name: WhatsApp Web compatibility
+
+# WhatsApp Web changes often. This checks weekly that the internal modules and functions
+# wa2sip drives (agent/page.js) still exist, so a breaking update is noticed before users do.
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t wa2sip:probe .
+      - run: docker run --rm --entrypoint node wa2sip:probe agent/probe.js

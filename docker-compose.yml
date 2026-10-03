@@ -1,0 +1,48 @@
+# wa2sip - WhatsApp (linked device) <-> SIP PBX bridge
+#
+#   cp .env.example .env      # optional: ports, admin password, ...
+#   docker compose up -d --build
+#   open http://<server-ip>:8092
+#
+# Host networking: SIP and RTP need real, reachable addresses (no Docker NAT).
+# seccomp-chromium.json = Docker's default profile + the user-namespace syscalls Chromium's
+# sandbox needs (WhatsApp Web shows content from strangers, so the sandbox stays on).
+
+name: wa2sip
+
+services:
+  wa2sip:
+    build: .
+    image: ghcr.io/revocx35/wa2sip:latest
+    container_name: wa2sip
+    restart: unless-stopped
+    network_mode: host
+    security_opt:
+      - seccomp=./seccomp-chromium.json
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=512m
+      - /home/wa2sip:rw,nosuid,nodev,size=256m,uid=1000,gid=1000,mode=0700
+    shm_size: 512m
+    environment:
+      WA2SIP_WEB_PORT: ${WEB_PORT:-8092}
+      WA2SIP_SIP_PORT: ${SIP_PORT:-5064}
+      WA2SIP_RTP_PORT_MIN: ${RTP_PORT_MIN:-17000}
+      WA2SIP_RTP_PORT_MAX: ${RTP_PORT_MAX:-17199}
+      WA2SIP_ADVERTISE_IP: ${ADVERTISE_IP:-}
+      WA2SIP_ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      WA2SIP_PIPER_PORT: ${PIPER_PORT:-18566}
+      WA2SIP_LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      WA2SIP_SIP_TRACE: ${SIP_TRACE:-false}
+      WA2SIP_WA_TRACE: ${WA_TRACE:-false}
+      WA2SIP_WA_DRIVER: ${WA_DRIVER:-chromium}
+      WA2SIP_CHROMIUM_SANDBOX: ${CHROMIUM_SANDBOX:-auto}
+      WA2SIP_SECURE_COOKIES: ${SECURE_COOKIES:-auto}
+      WA2SIP_TRUSTED_PROXIES: ${TRUSTED_PROXIES:-private}
+    volumes:
+      - wa2sip-data:/data
+
+volumes:
+  wa2sip-data:

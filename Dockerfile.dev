@@ -1,0 +1,6 @@
+# Development / test image: runtime Python deps + pytest + espeak-ng. Mount the repo at /src.
+FROM python:3.13-slim
+RUN apt-get update && apt-get install -y --no-install-recommends espeak-ng && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt pytest pytest-asyncio
