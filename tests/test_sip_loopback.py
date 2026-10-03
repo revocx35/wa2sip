@@ -134,3 +134,38 @@ async def test_register_with_digest_challenge():
     finally:
         await ua.stop()
         registrar.close()
+
+
+@pytest.mark.asyncio
+async def test_second_hangup_while_cancelling_does_not_wait():
+    """Two hang-ups of a ringing call (e.g. two cleanup paths) send one CANCEL and return fast."""
+    ua_a, ua_b, acc_a, pb = await make_pair()
+    incoming = []
+
+    async def on_incoming(call):
+        incoming.append(call)
+        call.ring()
+    ua_b.on_incoming = on_incoming
+    try:
+        call = await acc_a.dial(f"b@127.0.0.1:{pb}")
+        for _ in range(50):
+            if incoming:
+                break
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.1)
+        sent = []
+        real = call._send_cancel
+
+        async def counting():
+            sent.append(1)
+            await real()
+        call._send_cancel = counting
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        await asyncio.gather(call.hangup(), call.hangup())
+        assert len(sent) == 1                          # Asterisk doesn't answer a repeated CANCEL
+        assert loop.time() - t0 < 2.0
+        assert call.state == "ended" and call.end_reason.startswith("487")
+    finally:
+        await ua_a.stop()
+        await ua_b.stop()

@@ -15,11 +15,12 @@ IVR lists the bridge's contacts when you call the extension. One Docker Compose 
 Read [ARCHITECTURE.md](ARCHITECTURE.md) before changing call or media code (process model, call flows,
 audio pipeline, routing). WhatsApp Web module details: [docs/whatsapp-web-internals.md](docs/whatsapp-web-internals.md).
 
-## Status: what is verified and what isn't (v0.1.0, 2026-10-03)
+## Status: what is verified and what isn't (v0.2.0, 2026-10-03)
 
 Verified on the dev host (and in CI):
 - PBX side end to end against Asterisk 20 (`tools/e2e_fake.py`): registration, menu, RFC 4733 DTMF,
-  dial-a-number, ring-back, forked ringing, PAI caller ID with `trust_id_inbound`, CANCEL, BYE.
+  dial-a-number, ring-back, forked ringing, PAI caller ID with `trust_id_inbound`, CANCEL, BYE, and
+  bridge PINs in both directions (v0.2.0).
 - Audio path Chromium ↔ PulseAudio ↔ parec/pacat (`tools/audio_loopback.py`), sandbox on and off:
   ~100 ms, no level loss.
 - Real WhatsApp Web loads, shows a QR (also in the UI), the call monitor installs, and every module
@@ -116,7 +117,9 @@ ARCHITECTURE.md §2 has the full code map. In short: `wa2sip/` (Python engine: `
   command in `index.js#commands` + `AgentRuntime` + (if in-page) `page.js#api` + tests.
 - page.js runs inside WhatsApp Web: plain ES2020, no closures over Node values, every
   `window.require` guarded (`R()`/`D()`), errors carry a `code`.
-- Secrets (`password`) are write-only in the API (`redact()`/`merge()` in web/app.py).
+- Secrets (`password`) are write-only in the API (`redact()`/`merge()` in web/app.py). Bridge PINs
+  are visible to the admin, but must never reach logs or history: DTMF logs mask digits in the
+  `pin` phase, and `ask_pin` logs only "wrong PIN"/"no PIN entered".
 - UI: vanilla JS, no build step, escape everything with `esc()`. Keep `menuCodes()` in app.js equal
   to `Bridge.menu_codes()`.
 - When you change env vars, API or behaviour, update README.md, `.env.example`, both compose files
@@ -148,6 +151,11 @@ ARCHITECTURE.md §2 has the full code map. In short: `wa2sip/` (Python engine: `
   nothing (silence), as long as the sink isn't suspended (`-n` = no `module-suspend-on-idle`).
 - When the PBX caller hangs up, the outbound session must be **cancelled** (not polled). Otherwise
   history and cleanup wait for the current prompt or digit timeout (up to the menu length + 6 s).
+- PIN entry must accept **type-ahead**: people start typing during the announcement/prompt.
+  Clearing the key queue before the first try lost the first digits (found by test_pin).
+- `Call.hangup()` on a ringing outbound call sends **one** CANCEL. Two cleanup paths used to send two;
+  Asterisk ignores the repeated CANCEL, so the second `hangup()` waited 5 s for an answer and
+  sessions lingered (found by the e2e PIN step; `test_second_hangup_while_cancelling_does_not_wait`).
 - InboundSession cleanup must not decline a WhatsApp call it never accepted (e.g. the extension is
   not registered): leave it ringing on the phone. An accepted call is ended with `endCall`
   (`hangup`), never `rejectCall`.

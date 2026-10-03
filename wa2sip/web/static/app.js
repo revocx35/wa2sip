@@ -246,7 +246,7 @@ window.addEventListener('hashchange', route);
 
 /* ---------- calls (shared) ---------- */
 const PHASES = {
-  menu: ['caller is in the menu', 'info'], 'dial-number': ['caller is entering a number', 'info'],
+  menu: ['caller is in the menu', 'info'], 'dial-number': ['caller is entering a number', 'info'], pin: ['entering the PIN', 'info'],
   dialing: ['WhatsApp is ringing', 'warn'], ringing: ['ringing extensions', 'warn'], accepting: ['answering WhatsApp', 'warn'],
   connected: ['connected', 'ok'], starting: ['starting', ''], ended: ['ended', ''],
 };
@@ -633,11 +633,12 @@ function bridgeFlows(b) {
   if (b.outbound_enabled) {
     const menu = b.menu.map(m => `<span class="badge plain">${esc(m.code)}</span> ${esc(m.name)}`).join(' &nbsp;');
     const direct = b.menu.length === 1 && !b.dial_number && !b.menu_always;
-    lines.push(`<div><span class="dir">Call ${esc(ext?.username || '?')}</span><span>${direct ? `calls ${esc(b.menu[0].name)} on WhatsApp` : (menu || '<span class="muted">empty menu</span>') + (b.dial_number ? ` &nbsp;<span class="badge plain">${esc(b.dial_digit)}</span> any number` : '')}</span></div>`);
+    const lockOut = b.pin && b.pin_outbound ? '🔒 PIN, then ' : '';
+    lines.push(`<div><span class="dir">Call ${esc(ext?.username || '?')}</span><span>${lockOut}${direct ? `calls ${esc(b.menu[0].name)} on WhatsApp` : (menu || '<span class="muted">empty menu</span>') + (b.dial_number ? ` &nbsp;<span class="badge plain">${esc(b.dial_digit)}</span> any number` : '')}</span></div>`);
   }
   if (b.inbound_enabled) {
     const who = b.all_contacts ? 'Any WhatsApp caller' : b.contacts.filter(c => c.inbound).length ? b.contacts.filter(c => c.inbound).map(c => esc(c.name || fmtNumber(c.number))).join(', ') : '';
-    if (who) lines.push(`<div><span class="dir">WhatsApp call</span><span>${who}${b.all_contacts && b.contacts.some(c => c.inbound) ? ' (listed contacts first)' : ''} → rings <b>${esc((b.ring_targets || []).join(', ') || '?')}</b></span></div>`);
+    if (who) lines.push(`<div><span class="dir">WhatsApp call</span><span>${who}${b.all_contacts && b.contacts.some(c => c.inbound) ? ' (listed contacts first)' : ''} → rings <b>${esc((b.ring_targets || []).join(', ') || '?')}</b>${b.pin && b.pin_inbound ? ' · 🔒 PIN to answer' : ''}</span></div>`);
     const overrides = b.contacts.filter(c => c.inbound && c.ring.length);
     if (overrides.length) lines.push(`<div><span class="dir"></span><span class="small muted">${overrides.map(c => `${esc(c.name || c.number)} → ${esc(c.ring.join(', '))}`).join(' · ')}</span></div>`);
   }
@@ -693,6 +694,8 @@ const BRIDGE_DEFAULTS = {
   ivr_busy_text: '{name} is busy.', ivr_not_on_wa_text: 'This number is not on WhatsApp.',
   ivr_wa_busy_text: 'WhatsApp is already in another call. Please try again later.', ivr_offline_text: 'WhatsApp is not connected right now.',
   ivr_goodbye_text: 'Goodbye.', ivr_repeats: 3, ivr_timeout: 6, voice: '', speed: 0,
+  pin: '', pin_outbound: true, pin_inbound: true, pin_attempts: 3,
+  pin_prompt_text: 'Please enter your PIN, then press the hash key.', pin_wrong_text: 'Wrong PIN.',
 };
 
 function contactRow(c, code) {
@@ -741,6 +744,23 @@ async function bridgeForm(b) {
           <div class="toolbar"><input id="pick-q" placeholder="Search your WhatsApp contacts…" style="flex:1;min-width:200px">
             <input id="pick-num" placeholder="…or a number: 905321234567" style="width:210px" inputmode="tel"><button type="button" class="btn small" id="pick-add-num">Add number</button></div>
           <div class="picker-results" id="pick-results"></div>
+        </div>
+      </fieldset>
+
+      <fieldset><legend>PIN</legend>
+        <div class="row">
+          <label>PIN <span class="hint">4-16 digits; empty = no PIN</span><input name="pin" value="${esc(x.pin)}" inputmode="numeric" pattern="[0-9]{4,16}" maxlength="16" autocomplete="off" placeholder="none"></label>
+          <label>Attempts per call<input name="pin_attempts" type="number" min="1" max="10" value="${esc(x.pin_attempts)}"></label>
+        </div>
+        <div data-pin>
+          <label class="check"><input type="checkbox" name="pin_outbound" ${x.pin_outbound ? 'checked' : ''}> Ask callers of the extension, before the menu</label>
+          <label class="check"><input type="checkbox" name="pin_inbound" ${x.pin_inbound ? 'checked' : ''}> Ask whoever picks up an incoming WhatsApp call, before it is answered
+            <span class="hint">(the other extensions keep ringing meanwhile)</span></label>
+          <div class="row">
+            ${textField('PIN prompt', 'pin_prompt_text', x.pin_prompt_text)}
+            ${textField('Wrong PIN', 'pin_wrong_text', x.pin_wrong_text)}
+          </div>
+          <p class="hint muted small" style="margin:0 0 8px">Callers type the PIN and press #. After 10 wrong PINs in a row the bridge's PIN locks for a minute, doubling up to an hour.</p>
         </div>
       </fieldset>
 
@@ -885,8 +905,10 @@ async function bridgeForm(b) {
       $('[data-out]', form).classList.toggle('hidden', !form.outbound_enabled.checked);
       $('[data-dialnum]', form).classList.toggle('hidden', !form.dial_number.checked);
       form.announce_text.disabled = !form.announce.checked;
+      $('[data-pin]', form).classList.toggle('hidden', !form.pin.value.trim());
     };
     ['inbound_enabled', 'outbound_enabled', 'dial_number', 'announce'].forEach(n => form[n].addEventListener('change', sync));
+    form.pin.addEventListener('input', sync);
     form.dial_number.addEventListener('change', () => { collect(); drawContacts(); });
     form.dial_digit.addEventListener('change', () => { collect(); drawContacts(); });
     sync();

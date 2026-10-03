@@ -536,9 +536,10 @@ class Call:
             if self.direction == "inbound":
                 self.reject(603, "Decline")
                 return
-            self._cancel_requested = True
-            if self._invite_req:
-                await self._send_cancel()
+            if not self._cancel_requested:        # one CANCEL per call: a second one gets no answer
+                self._cancel_requested = True
+                if self._invite_req:
+                    await self._send_cancel()
             # wait briefly for the 487 so the transaction completes cleanly
             try:
                 await asyncio.wait_for(asyncio.shield(self.ended.wait()), 4)

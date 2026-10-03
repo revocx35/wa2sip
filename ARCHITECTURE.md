@@ -50,11 +50,12 @@ flowchart TB
 wa2sip/
   __main__.py        entry point (uvicorn)
   settings.py        WA2SIP_* environment variables
-  models.py          pydantic config: Pbx, Extension, WaAccount, Bridge (+ BridgeContact, menu_codes), AppSettings
+  models.py          pydantic config: Pbx, Extension, WaAccount, Bridge (+ BridgeContact, menu_codes, PIN), AppSettings
+  pin.py             PinGuard: per-bridge wrong-PIN counting and lock-out
   store.py           JSON persistence (/data/config.json, call_history.json) + routing (route_wa_call, routing_conflict)
   engine.py          Engine: config -> SIP accounts + WhatsApp runtimes, call routing in both directions,
                      prompt rendering/caching, history, status
-  sessions.py        SipLeg (paced RTP out, prompts/tones with priority, DTMF in), Session base,
+  sessions.py        SipLeg (paced RTP out, prompts/tones with priority, DTMF in), KeyBuffer, Session base (+ ask_pin),
                      OutboundSession (PBX -> IVR -> WhatsApp), InboundSession (WhatsApp -> ring PBX), normalize_number
   wa/
     base.py          WaRuntime interface, WaCall, WhatsApp CallState mapping, end reasons, AudioPipe
@@ -196,6 +197,10 @@ sequenceDiagram
     P->>X: dial 1009
     X->>E: INVITE sip:wa-xxxx@host:5064
     E-->>X: 200 OK (PCMA/PCMU + telephone-event)
+    opt bridge PIN (pin_outbound)
+      E->>P: "Please enter your PIN, then press the hash key."
+      P->>E: DTMF 4711#
+    end
     E->>P: "Welcome. Press 1 for Ali. Press 2 for Ayşe."
     P->>E: DTMF 2 (RFC 4733, SIP INFO or in-band)
     par
@@ -213,6 +218,9 @@ sequenceDiagram
     E->>W: hangup (endCall)
 ```
 
+- **PIN** (`Session.ask_pin`, when `pin_outbound`): asked first, before WhatsApp's state is revealed.
+  Keys until `#` (or a 5 s pause), `*` starts over, max 16 digits; keys typed during the prompt count.
+  `pin_attempts` tries per call, then *"Wrong PIN." "Goodbye."* and BYE (history: `wrong PIN`).
 - **Menu codes** (`Bridge.menu_codes()`, mirrored in the UI): explicit keys first, then `1-9`, or
   `10-99` for all contacts when there are more than nine entries. Codes stay prefix-free, and the
   dial-number key is reserved. The collector returns as soon as a code is unambiguous and waits
@@ -248,13 +256,22 @@ sequenceDiagram
     X->>P2: ring
     P2-->>X: answer
     X-->>E: 200 OK (1002)
+    opt bridge PIN (pin_inbound): 1001 keeps ringing meanwhile
+      E->>P2: "WhatsApp call from Ali. Please enter your PIN…"
+      P2->>E: DTMF 4711#
+    end
     E->>X: CANCEL 1001
     E->>W: accept (trusted click)
-    E->>P2: "WhatsApp call from Ali."
+    E->>P2: "WhatsApp call from Ali." (unless already said with the PIN prompt)
     W-->>E: state active
     Note over C,P2: audio bridged
 ```
 
+- **PIN** (`pin_inbound`): every extension that picks up gets its own `SipLeg` + `KeyBuffer` and is
+  asked for the PIN (after the announcement) while the others keep ringing. The first right PIN wins
+  and WhatsApp is answered only then. A wrong PIN hangs up that phone only. If nobody unlocks the
+  call, it ends like an unanswered one (history: `wrong PIN`). No audio goes to WhatsApp before it is
+  answered.
 - Ring targets come from the contact's `ring` list, else the bridge's `ring_targets`. All of them are
   called in parallel through the bridge's extension account; the first 200 OK wins and the rest get
   CANCEL.
@@ -275,6 +292,11 @@ sequenceDiagram
 ## 6. Routing rules (`store.py`)
 
 - One enabled bridge per extension: the extension identifies the bridge for PBX → WhatsApp calls.
+- **PinGuard** (`pin.py`, in memory): wrong PINs are counted per bridge across calls and both
+  directions. After 10 in a row the PIN locks for 60 s, doubling per further wrong PIN up to 1 h;
+  while locked, every PIN (the right one too) gets *"Wrong PIN"*. A right PIN resets the count.
+  Comparison is constant-time; PIN digits are never logged (DTMF debug logs show `•` in the PIN
+  phase).
 - Per WhatsApp account, an inbound contact (matched by `wa_id` in {jid, lid, `<number>@c.us`} or by
   number) may be listed on only one enabled, inbound-enabled bridge. At most one catch-all bridge
   per account.

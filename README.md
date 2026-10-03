@@ -103,6 +103,7 @@ A bridge connects one WhatsApp account with one extension that wa2sip registers.
 | **Menu** | Greeting plus one line per contact, in the voice and speed you choose. **▶ Preview menu** plays it. With a single contact and no other option, the contact is called directly. |
 | **Dial any number** | Menu key (default `0`): enter a number and press `#`. Numbers starting with the national prefix (e.g. `0532…`) get your country code; `00…` works too. |
 | **During the call** | `*` hangs up WhatsApp (or cancels it while it rings) and returns to the menu, when there is a menu. The caller hears a ring tone while WhatsApp rings, and a spoken message if the contact declines, is busy or doesn't answer. |
+| **PIN** | 4-16 digits, typed followed by `#`. Callers of the extension enter it before the menu, and whoever picks up an incoming WhatsApp call enters it before WhatsApp is answered (the other extensions keep ringing meanwhile). Each direction can be turned off. After 10 wrong PINs in a row the bridge's PIN locks for a minute, doubling up to an hour. |
 | **Allowed callers** | Restrict which PBX extensions may use the bridge. |
 
 Examples:
@@ -148,6 +149,8 @@ keep you linked.
   cookie, cross-site request checks). Put it behind HTTPS (e.g. Nginx Proxy Manager) if you expose it.
 - Anyone with the admin password can read your WhatsApp contacts and place WhatsApp calls. Treat it
   like your phone's PIN.
+- Anyone who can call a bridge's extension can make WhatsApp calls through it. Give bridges a
+  **PIN** (and/or *Allowed callers*) if your PBX has users or trunks you don't fully trust.
 - Chromium shows content from strangers (WhatsApp Web), so it keeps its **sandbox** on via
   `seccomp-chromium.json`. The container also runs as non-root with a read-only root filesystem and
   no capabilities. See [docs/security.md](docs/security.md).

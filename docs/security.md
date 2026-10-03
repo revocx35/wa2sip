@@ -50,7 +50,12 @@ renderer exploit would land in Chromium, so:
   all interfaces, and Piper on 127.0.0.1 only.
 - Inbound SIP requests aren't authenticated (like most phones). Restrict 5064/udp and the RTP range
   to your PBX with a host firewall if the host is reachable from untrusted networks.
-- Bridges can restrict which PBX callers may use them (*Allowed callers*).
+- Bridges can restrict which PBX callers may use them (*Allowed callers*) and require a **PIN**,
+  both for calling out to WhatsApp and for answering incoming WhatsApp calls. Wrong PINs are counted
+  per bridge across calls: after 10 in a row the PIN is locked (60 s, doubling up to an hour, the
+  right PIN refused too), which keeps a 4-digit PIN from being guessed by redialling. PINs are
+  compared in constant time and never written to the log or the call history. They are stored in
+  `/data/config.json` and shown to the admin in the bridge editor.
 
 ## WhatsApp account
 

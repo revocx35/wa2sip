@@ -34,6 +34,9 @@ log = logging.getLogger("wa2sip.session")
 DTMF_EVENTS = "0123456789*#ABCD"
 INTERDIGIT = 2.5            # seconds between keys of a multi-digit menu code
 NUMBER_INTERDIGIT = 6.0     # dial-a-number: max pause between digits
+PIN_FIRST_KEY = 10.0        # PIN: time for the first key after the prompt
+PIN_INTERDIGIT = 5.0        # PIN: max pause between keys (then the PIN counts as entered)
+PIN_MAX_DIGITS = 16
 RTP_TIMEOUT = 60.0
 
 
@@ -155,6 +158,19 @@ class SipLeg:
                 "buffer_ms": int(len(p.buf) / 8) if p else 0, "prompting": self.prompting}
 
 
+class KeyBuffer:
+    """DTMF keys of one call leg, for a PIN prompt: queued, and every key cuts the prompt short."""
+
+    def __init__(self) -> None:
+        self.queue: asyncio.Queue[str] = asyncio.Queue()
+        self.leg: SipLeg | None = None
+
+    def __call__(self, digit: str) -> None:
+        self.queue.put_nowait(digit)
+        if self.leg:
+            self.leg.stop_prompt()
+
+
 class Session:
     """Common parts: the WhatsApp call, its audio pipe, history, status."""
 
@@ -226,19 +242,63 @@ class Session:
         values.update(extra)
         return tts.fill(template, **values)
 
-    async def say(self, text: str, wait: bool = True) -> None:
-        if not self.leg or not text.strip() or self.leg.call.state != "active":
+    async def say(self, text: str, wait: bool = True, leg: SipLeg | None = None) -> None:
+        leg = leg or self.leg
+        if not leg or not text.strip() or leg.call.state != "active":
             return
-        audio = await self.engine.prompt_audio(text, self.bridge, self.leg.codec)
-        self.leg.play(audio)
+        audio = await self.engine.prompt_audio(text, self.bridge, leg.codec)
+        leg.play(audio)
         if wait:
-            done = asyncio.create_task(self.leg.wait_prompt())
-            gone = asyncio.create_task(self.leg.call.ended.wait())
+            done = asyncio.create_task(leg.wait_prompt())
+            gone = asyncio.create_task(leg.call.ended.wait())
             try:
                 await asyncio.wait({done, gone}, return_when=asyncio.FIRST_COMPLETED)
             finally:
                 done.cancel()
                 gone.cancel()
+
+    # -- PIN ----------------------------------------------------------------------------------------
+    async def ask_pin(self, leg: SipLeg, digits: asyncio.Queue, who: str) -> bool:
+        """Ask for the bridge PIN on `leg` (keys arrive in `digits`). Never logs the digits."""
+        b = self.bridge
+        for attempt in range(1, b.pin_attempts + 1):
+            if leg.call.state != "active":
+                return False
+            if attempt > 1:                       # keys typed ahead count only for the first try
+                while not digits.empty():
+                    digits.get_nowait()
+            if digits.empty():
+                await self.say(b.pin_prompt_text, wait=False, leg=leg)
+            entered = await self._collect_pin(leg, digits)
+            if entered and self.engine.pins.check(b.id, entered, b.pin, who):
+                log.info("[%s] PIN accepted from %s", b.name or b.id, who)
+                return True
+            if leg.call.state != "active":
+                return False
+            log.warning("[%s] %s from %s (attempt %d of %d)", b.name or b.id,
+                        "wrong PIN" if entered else "no PIN entered", who, attempt, b.pin_attempts)
+            await self.say(b.pin_wrong_text, leg=leg)
+        return False
+
+    @staticmethod
+    async def _collect_pin(leg: SipLeg, digits: asyncio.Queue) -> str:
+        """Keys until '#' (or a pause); '*' starts over. The prompt's length counts as extra time."""
+        entered = ""
+        timeout = PIN_FIRST_KEY + 8       # the prompt itself takes a few seconds
+        while len(entered) < PIN_MAX_DIGITS:
+            try:
+                d = await asyncio.wait_for(digits.get(), timeout)
+            except TimeoutError:
+                break
+            leg.stop_prompt()
+            if d == "#":
+                break
+            if d == "*":
+                entered = ""
+            elif d.isdigit():
+                entered += d
+            timeout = PIN_INTERDIGIT
+        return entered
 
     # -- status --------------------------------------------------------------------------------
     def info(self) -> dict:
@@ -300,6 +360,12 @@ class OutboundSession(Session):
     async def _main(self) -> None:
         b = self.bridge
         rt = self.runtime
+        if b.pin_required("outbound"):
+            self.phase = "pin"
+            if not await self.ask_pin(self.leg, self.digits, self.caller):
+                self.result = "wrong PIN"
+                await self._goodbye()
+                return
         if not rt or not rt.ready:
             log.info("[%s] WhatsApp is not connected - telling the caller", b.name or b.id)
             self.result = "WhatsApp not connected"
@@ -534,9 +600,9 @@ class OutboundSession(Session):
 
     # -- keys, watchdog, teardown ----------------------------------------------------------------------
     def _on_dtmf(self, digit: str) -> None:
-        log.debug("DTMF %s (%s)", digit, self.phase)
+        log.debug("DTMF %s (%s)", "•" if self.phase == "pin" else digit, self.phase)
         self.digits.put_nowait(digit)
-        if self.phase in ("menu", "dial-number") and self.leg:
+        if self.phase in ("menu", "dial-number", "pin") and self.leg:
             self.leg.stop_prompt()                # barge-in: a key press cuts any prompt short
 
     async def _watchdog(self) -> None:
@@ -587,6 +653,7 @@ class InboundSession(Session):
         self.call: Call | None = None
         self.answered_by = ""
         self.accepted = False
+        self.pin_failed = False
 
     async def run(self) -> None:
         try:
@@ -621,46 +688,99 @@ class InboundSession(Session):
         if not self.forks:
             self.result = "could not ring any extension"
             return
-        winner = await self._wait_answer()
+        won = await self._wait_answer()
+        winner = won[0] if won else None
         for f in self.forks:
             if f is not winner and f.state != "ended":
                 asyncio.create_task(f.hangup("answered elsewhere" if winner else "WhatsApp caller gone"))
-        if not winner:
+        if not won:
             if self.wa_call and not self.wa_call.ended:
-                self.result = "no answer"
+                self.result = "wrong PIN" if self.pin_failed else "no answer"
                 if b.reject_unanswered:
-                    log.info("nobody answered the WhatsApp call from %s - declining it", self.peer_name)
+                    log.info("nobody %s the WhatsApp call from %s - declining it",
+                             "unlocked" if self.pin_failed else "answered", self.peer_name)
                     await self._end_wa("no answer")
             else:
                 self.result = f"WhatsApp caller hung up ({self.wa_call.reason if self.wa_call else ''})"
                 log.info("WhatsApp call from %s ended while ringing", self.peer_name)
             return
-        await self._connected(winner)
+        await self._connected(*won)
 
-    async def _wait_answer(self) -> Call | None:
-        deadline = time.monotonic() + self.bridge.ring_timeout
-        while time.monotonic() < deadline:
-            for f in self.forks:
-                if f.state == "active":
-                    return f
-            if all(f.state == "ended" for f in self.forks):
-                return None
-            if not self.wa_call or self.wa_call.ended:
-                return None
-            try:
-                ev = await asyncio.wait_for(self.wa_events.get(), 0.1)
-                self.wa_call = ev
-            except TimeoutError:
-                pass
-        return None
+    async def _wait_answer(self) -> tuple[Call, SipLeg, bool] | None:
+        """The fork that answered (and entered the PIN, when one is required).
 
-    async def _connected(self, call: Call) -> None:
+        Returns (call, its SipLeg, announced). With a PIN, every extension that picks up is asked
+        for it while the others keep ringing; the first right PIN wins, wrong ones are hung up.
+        """
+        b = self.bridge
+        need_pin = b.pin_required("inbound")
+        deadline = time.monotonic() + b.ring_timeout
+        checks: dict[Call, tuple[SipLeg, asyncio.Task | None]] = {}
+        winner: Call | None = None
+        try:
+            while True:
+                for f in self.forks:
+                    if f.state != "active" or f in checks:
+                        continue
+                    if not need_pin:
+                        leg = SipLeg(f, self._on_dtmf, self._phone_audio)
+                        leg.start()
+                        winner = f
+                        return f, leg, False
+                    keys = KeyBuffer()
+                    leg = SipLeg(f, keys, lambda payload, codec: None)   # no audio to WhatsApp yet
+                    keys.leg = leg
+                    leg.start()
+                    self.phase = "pin"
+                    checks[f] = (leg, asyncio.create_task(self._verify_answerer(f, leg, keys.queue)))
+                for f, (leg, task) in checks.items():
+                    if task and task.done() and not task.cancelled() and task.result():
+                        winner = f
+                        leg.on_dtmf = self._on_dtmf
+                        f.on_dtmf = self._on_dtmf
+                        leg.on_audio = self._phone_audio
+                        return f, leg, b.announce
+                pending = any(t and not t.done() for _, t in checks.values())
+                if not self.wa_call or self.wa_call.ended:
+                    return None
+                if not pending and all(f.state == "ended" for f in self.forks):
+                    return None
+                if time.monotonic() > deadline:
+                    for f in self.forks:
+                        if f.state == "ringing":
+                            asyncio.create_task(f.hangup("no answer"))
+                    if not pending:
+                        return None
+                try:
+                    self.wa_call = await asyncio.wait_for(self.wa_events.get(), 0.1)
+                except TimeoutError:
+                    pass
+        finally:
+            for f, (leg, task) in checks.items():
+                if f is not winner:
+                    if task:
+                        task.cancel()
+                    leg.stop()
+
+    async def _verify_answerer(self, call: Call, leg: SipLeg, digits: asyncio.Queue) -> bool:
+        who = call.remote_user or "?"
+        log.info("extension %s answered the WhatsApp call from %s - asking for the PIN", who, self.peer_name)
+        await asyncio.sleep(0.3)                      # let the media path settle
+        if self.bridge.announce:
+            await self.say(self.fill(self.bridge.announce_text), leg=leg)
+        if await self.ask_pin(leg, digits, who):
+            return True
+        self.pin_failed = True
+        await self.say(self.bridge.ivr_goodbye_text, leg=leg)
+        await call.hangup("wrong PIN")
+        return False
+
+    async def _connected(self, call: Call, leg: SipLeg, announced: bool) -> None:
         b = self.bridge
         rt = self.runtime
         self.call = call
         self.answered_by = call.remote_user
-        self.leg = SipLeg(call, self._on_dtmf, self._phone_audio)
-        self.leg.start()
+        self.leg = leg
         log.info("extension %s answered the WhatsApp call from %s", call.remote_user, self.peer_name)
         self.phase = "accepting"
         try:
@@ -672,7 +792,7 @@ class InboundSession(Session):
             await self.say(self.fill(b.ivr_failed_text))
             return
         await self._open_pipe()
-        if b.announce:
+        if b.announce and not announced:
             await self.say(self.fill(b.announce_text))
         state = self.wa_call.state
         while True:

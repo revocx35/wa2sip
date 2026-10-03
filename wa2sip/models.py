@@ -165,6 +165,14 @@ class Bridge(BaseModel):
     ivr_repeats: int = Field(default=3, ge=1, le=10)
     ivr_timeout: int = Field(default=6, ge=2, le=30)    # seconds to wait for a key after the menu
 
+    # PIN: asked before the menu (PBX -> WhatsApp) and/or before a WhatsApp call is answered
+    pin: str = ""                    # 4-16 digits; empty = no PIN
+    pin_outbound: bool = True        # callers of the extension must enter it
+    pin_inbound: bool = True         # whoever picks up an incoming WhatsApp call must enter it
+    pin_attempts: int = Field(default=3, ge=1, le=10)
+    pin_prompt_text: str = "Please enter your PIN, then press the hash key."
+    pin_wrong_text: str = "Wrong PIN."
+
     voice: str = ""                  # "" = the default voice (Settings)
     speed: int = Field(default=0, ge=0, le=400)          # words per minute, 0 = default
 
@@ -188,6 +196,17 @@ class Bridge(BaseModel):
         if v and (len(v) != 1 or v not in DTMF_KEYS):
             raise ValueError("one key (0-9, * or #) or empty")
         return v
+
+    @field_validator("pin")
+    @classmethod
+    def _pin(cls, v: str) -> str:
+        v = (v or "").strip()
+        if v and (not v.isdigit() or not 4 <= len(v) <= 16):
+            raise ValueError("a PIN is 4 to 16 digits")
+        return v
+
+    def pin_required(self, direction: Literal["outbound", "inbound"]) -> bool:
+        return bool(self.pin) and (self.pin_outbound if direction == "outbound" else self.pin_inbound)
 
     @field_validator("country_code", "national_prefix")
     @classmethod

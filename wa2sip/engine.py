@@ -11,6 +11,7 @@ from collections import OrderedDict
 from .media import g711, tts
 from .media.rtp import PortAllocator
 from .models import Bridge
+from .pin import PinGuard
 from .sessions import InboundSession, OutboundSession, Session
 from .settings import Settings
 from .sip.ua import AccountConfig, Call, UserAgent
@@ -36,6 +37,7 @@ class Engine:
         self.sessions: dict[str, Session] = {}
         self.wa_owner: dict[str, Session] = {}            # WhatsApp call id -> session
         self.recent_wa: OrderedDict[str, WaCall] = OrderedDict()
+        self.pins = PinGuard()                              # wrong-PIN counting per bridge
         self._audio: OrderedDict[tuple, bytes] = OrderedDict()
         self._tasks: set[asyncio.Task] = set()
         self.started = time.time()
@@ -123,6 +125,8 @@ class Engine:
                  b.ivr_wa_busy_text, b.ivr_not_on_wa_text]
         if b.dial_number:
             texts.append(b.ivr_enter_text)
+        if b.pin:
+            texts += [b.pin_prompt_text, b.pin_wrong_text]
         for c in b.contacts:
             name = c.label()
             for tpl in (b.ivr_calling_text, b.ivr_failed_text, b.ivr_busy_text):

@@ -14,6 +14,8 @@ What it checks, through Asterisk:
      WhatsApp: the caller hears the "not on WhatsApp" prompt.
   3. WhatsApp -> PBX: a simulated WhatsApp call rings 2001 (registered by this script), which
      answers, hears the announcement and then the echoed tone; hanging up ends the WhatsApp call.
+  4. With a bridge PIN: calling 1009 needs the PIN before the menu, and answering a WhatsApp call
+     needs it before WhatsApp is answered.
 """
 
 from __future__ import annotations
@@ -258,6 +260,44 @@ async def test_inbound(api, phone: Phone, ctx: dict) -> None:
     check(ringing.state == "ended", f"ringing stopped ({ringing.end_reason})")
 
 
+async def test_pin(api, phone: Phone, ctx: dict) -> None:
+    print("PIN on both directions")
+    b = ctx["bridge"]
+    r = await api.put(f"/api/bridges/{b['id']}", json={"pin": "4711"})
+    check(r.status_code == 200, "bridge PIN set")
+    call = await phone.account.dial("1009")
+    await asyncio.wait_for(call.answered.wait(), 10)
+    await silence_for(call, 0.8)
+    for d in "4711#":
+        await call.send_dtmf(d)
+    await silence_for(call, 1.0)
+    active = (await api.get("/api/calls")).json()["active"]
+    phase = next((x["phase"] for x in active if x["kind"] == "pbx-to-wa"), "no session")
+    check(phase == "menu", f"PIN accepted, caller is in the menu ({phase})")
+    await call.hangup()
+    await asyncio.sleep(1.0)
+
+    alice = ctx["contacts"][0]
+    await api.post(f"/api/wa/{ctx['wa']['id']}/simulate-call", json={"number": alice["number"]})
+    for _ in range(100):
+        if phone.incoming:
+            break
+        await asyncio.sleep(0.05)
+    incoming = phone.incoming.pop()
+    await incoming.answer()
+    await silence_for(incoming, 1.0)
+    st = (await api.get(f"/api/wa/{ctx['wa']['id']}/status")).json()
+    check(st["calls"][0]["state"] == "incoming", "WhatsApp not answered before the PIN")
+    for d in "4711#":
+        await incoming.send_dtmf(d)
+    await silence_for(incoming, 1.5)
+    st = (await api.get(f"/api/wa/{ctx['wa']['id']}/status")).json()
+    check(st["calls"] and st["calls"][0]["state"] == "active", "WhatsApp answered after the PIN")
+    await incoming.hangup()
+    await asyncio.sleep(1.0)
+    await api.put(f"/api/bridges/{b['id']}", json={"pin": ""})
+
+
 async def main(args) -> int:
     logging.basicConfig(level=logging.WARNING)
     async with httpx.AsyncClient(base_url=args.url, timeout=20) as api:
@@ -272,6 +312,7 @@ async def main(args) -> int:
             await test_outbound(api, p1, ctx)
             await test_dial_number_inband(api, p2, ctx)
             await test_inbound(api, p1, ctx)
+            await test_pin(api, p1, ctx)
         finally:
             await p1.stop()
             await p2.stop()
