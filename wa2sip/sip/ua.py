@@ -210,7 +210,7 @@ class Account:
 
     # -- outgoing calls ----------------------------------------------------------------
     async def dial(self, target: str, display_name: str | None = None,
-                   asserted_user: str | None = None) -> "Call":
+                   asserted_user: str | None = None, extra_headers: list[tuple[str, str]] | None = None) -> "Call":
         """Call `target` (an extension/number on this PBX, or a full SIP URI).
 
         `display_name` replaces the account's display name in From for this call only.
@@ -224,6 +224,7 @@ class Account:
         dest = await self.dest()
         call = Call(self.ua, self, "outbound")
         call.from_display = display_name
+        call.extra_headers = list(extra_headers or [])
         if asserted_user:
             name = (display_name or "").replace('"', "").replace("\\", "").strip()
             call.asserted_identity = (f'"{name}" ' if name else "") + f"<sip:{asserted_user}@{self.domain}>"
@@ -287,6 +288,7 @@ class Call:
         self._pending_key: str | None = None
         self.from_display: str | None = None     # outbound: per-call display name in From
         self.asserted_identity: str | None = None  # outbound: P-Asserted-Identity header value
+        self.extra_headers: list[tuple[str, str]] = []   # outbound: added to the INVITE
 
     # -- info ------------------------------------------------------------------------
     @property
@@ -435,6 +437,8 @@ class Call:
         req.add("User-Agent", self.ua.user_agent)
         if self.asserted_identity:
             req.add("P-Asserted-Identity", self.asserted_identity)
+        for k, v in self.extra_headers:
+            req.add(k, v)
         req.add("Content-Type", "application/sdp")
         if auth:
             req.add(*auth)
@@ -673,6 +677,8 @@ class UserAgent:
         self.accounts: dict[str, Account] = {}
         self.calls: dict[tuple[str, str], Call] = {}
         self.on_incoming: IncomingHandler | None = None
+        # resolves INVITEs to addresses no registered account owns (one-time integration call tickets)
+        self.direct_resolver: Callable[[str], Account | None] | None = None
         self._pending: dict[str, Call] = {}   # INVITE branch -> ringing inbound call
         self.stack.request_handler = self._on_request
         self.stack.cancel_handler = self._on_cancel
@@ -715,7 +721,11 @@ class UserAgent:
         except Exception:
             to_user = None
         matches = [a for a in self.accounts.values() if to_user and a.cfg.username == to_user]
-        return matches[0] if len(matches) == 1 else None
+        if len(matches) == 1:
+            return matches[0]
+        if ruser and self.direct_resolver:
+            return self.direct_resolver(ruser)
+        return None
 
     # -- calls ------------------------------------------------------------------------------------
     def register_call(self, call: Call) -> None:

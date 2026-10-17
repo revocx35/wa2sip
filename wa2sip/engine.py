@@ -12,9 +12,10 @@ from .media import g711, tts
 from .media.rtp import PortAllocator
 from .models import Bridge
 from .pin import PinGuard
-from .sessions import InboundSession, OutboundSession, Session
+from .integration import Tickets
+from .sessions import DirectSession, InboundSession, OutboundSession, Session, TelerouterSession
 from .settings import Settings
-from .sip.ua import AccountConfig, Call, UserAgent
+from .sip.ua import Account, AccountConfig, Call, UserAgent
 from .store import Store
 from .wa.base import WaCall
 from .wa.manager import WaManager
@@ -32,6 +33,8 @@ class Engine:
         self.ua = UserAgent(settings.sip_port, self.ports, settings.advertise_ip,
                             user_agent=f"wa2sip/{settings.version}", bind=settings.sip_bind)
         self.ua.on_incoming = self.on_incoming
+        self.tickets = Tickets()                            # one-time addresses for integration calls
+        self.ua.direct_resolver = self._ticket_account
         self.wa = WaManager(settings, self.on_wa_call)
         self.tts = tts.Tts(data_dir=settings.data_dir, piper_port=settings.piper_port)
         self.sessions: dict[str, Session] = {}
@@ -154,9 +157,27 @@ class Engine:
         except Exception as e:
             log.debug("prompt prewarm failed: %s", e)
 
+    # -- integration calls (telerouter) ---------------------------------------------------------------
+    def _ticket_account(self, user: str) -> Account | None:
+        """A non-registering account for an INVITE to a one-time integration address."""
+        if not self.tickets.peek(user):
+            return None
+        return Account(self.ua, AccountConfig(id=f"ticket:{user}", server="0.0.0.0", port=5060, username="wa2sip",
+                                              password="", display_name="WhatsApp", contact_user=user))
+
     # -- PBX -> WhatsApp --------------------------------------------------------------------------------
     async def on_incoming(self, call: Call) -> None:
         ext_id = call.account.cfg.id
+        if ext_id.startswith("ticket:"):
+            src = call.peer_addr[0] if call.peer_addr else ""
+            ticket = self.tickets.take(ext_id[7:], src)
+            if not ticket:
+                call.reject(404, "Not Found")
+                return
+            session = DirectSession(self, call, self.wa.get(ticket.account_id), ticket)
+            self._start_session(session)
+            log.info("integration call from %s -> WhatsApp %s", src, ticket.label)
+            return
         bridge = self.store.bridge_for_extension(ext_id)
         who = call.remote_user or "unknown"
         if not bridge or not bridge.outbound_enabled:
@@ -209,6 +230,14 @@ class Engine:
                      call.peer_label())
             return
         bridge, contact, why = self.store.route_wa_call(call.account_id, call.peer)
+        st = self.store.config.settings
+        if st.telerouter_enabled and st.telerouter_uri and not (bridge and contact):
+            # telerouter takes the call unless a bridge lists this contact explicitly; a catch-all
+            # bridge stays the fallback when telerouter doesn't answer
+            session = TelerouterSession(self, call, rt, st.telerouter_uri, bridge if bridge else None)
+            self.wa_owner[call.id] = session
+            self._start_session(session)
+            return
         if not bridge:
             acc = self.store.wa_account(call.account_id)
             if acc and acc.unrouted == "reject":
@@ -221,6 +250,16 @@ class Engine:
         if not targets:
             log.warning("WhatsApp call from %s: bridge '%s' has no extensions to ring", call.peer_label(),
                         bridge.name or bridge.id)
+            return
+        session = InboundSession(self, bridge, contact, call, rt)
+        self.wa_owner[call.id] = session
+        self._start_session(session)
+
+    def start_inbound(self, bridge: Bridge, contact, call: WaCall, rt) -> None:
+        """Hand an incoming WhatsApp call to a bridge (fallback after telerouter didn't take it)."""
+        targets = (contact.ring if contact and contact.ring else None) or bridge.ring_targets
+        if not targets:
+            self.wa_owner.pop(call.id, None)
             return
         session = InboundSession(self, bridge, contact, call, rt)
         self.wa_owner[call.id] = session

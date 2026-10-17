@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import secrets
 import time
 from typing import TYPE_CHECKING
 
@@ -858,3 +859,263 @@ def normalize_number(number: str, national_prefix: str, country_code: str) -> st
     if country_code and national_prefix and n.startswith(national_prefix):
         return country_code + n[len(national_prefix):]
     return n
+
+
+# =====================================================================================================
+def _integration_bridge(account_id: str) -> Bridge:
+    """Prompt/voice defaults for calls that come through the integration API (no bridge involved)."""
+    return Bridge(name="telerouter", wa_account_id=account_id, extension_id="")
+
+
+class DirectSession(Session):
+    """Integration call (telerouter -> WhatsApp): an INVITE to a one-time address dials WhatsApp.
+
+    SIP mirrors WhatsApp: 180 while the contact's phone rings, 200 when they answer, and a failure
+    status when they don't (486 busy, 404 not on WhatsApp, 603 declined, 480 otherwise).
+    """
+
+    kind = "integration-to-wa"
+
+    def __init__(self, engine: "Engine", call: Call, runtime: WaRuntime | None, ticket):
+        super().__init__(engine, _integration_bridge(ticket.account_id), runtime)
+        self.call = call
+        self.id = call.id
+        self.ticket = ticket
+        self.peer_name = ticket.label
+        self.caller = f"integration ({call.peer_addr[0] if call.peer_addr else '?'})"
+
+    async def run(self) -> None:
+        try:
+            await self._main()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("integration call failed")
+        finally:
+            await self._finish()
+
+    def _fail(self, status: int, reason: str, result: str) -> None:
+        self.result = result
+        if self.call.state == "ringing":
+            self.call.reject(status, reason)
+
+    async def _main(self) -> None:
+        rt = self.runtime
+        call = self.call
+        if not rt or not rt.ready:
+            self._fail(503, "Service Unavailable", "WhatsApp not connected")
+            return
+        if rt.active_call() or self.engine.wa_busy(rt.account_id, self):
+            self._fail(486, "Busy Here", "WhatsApp busy")
+            return
+        self.phase = "dialing"
+        try:
+            wa_call = await rt.dial(self.ticket.target)
+        except WaError as e:
+            log.info("integration call to %s failed: %s", self.ticket.label, e)
+            if e.code == "not_on_whatsapp":
+                self._fail(404, "Not Found", "not on WhatsApp")
+            elif e.code == "busy":
+                self._fail(486, "Busy Here", "WhatsApp busy")
+            else:
+                self._fail(480, "Temporarily Unavailable", f"WhatsApp: {e}")
+            return
+        self.wa_call = wa_call
+        self.engine.claim_wa_call(wa_call, self)
+        if wa_call.peer.get("number"):
+            self.peer_number = wa_call.peer["number"]
+        deadline = time.monotonic() + self.bridge.dial_timeout
+        state = wa_call.state
+        rang = False
+        while True:
+            if call.state == "ended":                       # the caller cancelled or hung up
+                await self._end_wa("integration caller hung up")
+                self.result = self.result or "cancelled"
+                return
+            if state == "ringing" and not rang:
+                rang = True
+                call.ring()
+            if state == "active" and self.phase != "connected":
+                if call.state == "ringing":
+                    await call.answer()
+                    self.leg = SipLeg(call, lambda d: None, self._phone_audio)
+                    self.leg.start()
+                    await self._open_pipe()
+                self.phase = "connected"
+                self.connected_at = time.time()
+                self.result = "connected"
+                log.info("integration call bridged with WhatsApp %s", self.ticket.label)
+            if state in ("ended", "elsewhere"):
+                reason = self.wa_call.reason if self.wa_call else ""
+                if self.phase == "connected":
+                    self.phase = "ended"
+                    if call.state == "active":
+                        await call.hangup("WhatsApp call ended")
+                    return
+                if reason == "busy":
+                    self._fail(486, "Busy Here", "WhatsApp: busy")
+                elif reason in ("declined", "rejected"):
+                    self._fail(603, "Decline", "WhatsApp: declined")
+                else:
+                    self._fail(480, "Temporarily Unavailable", f"WhatsApp: {reason or 'not answered'}")
+                return
+            if self.phase != "connected" and time.monotonic() > deadline:
+                await self._end_wa("no answer")
+                self._fail(480, "Temporarily Unavailable", "WhatsApp: not answered")
+                return
+            if self.phase == "connected" and call.answered_at and \
+                    time.time() - call.answered_at > self.bridge.max_call_seconds:
+                await call.hangup("max call duration reached")
+                return
+            try:
+                ev = await asyncio.wait_for(self.wa_events.get(), 0.25)
+                state = ev.state
+            except TimeoutError:
+                if self.wa_call:
+                    state = self.wa_call.state
+
+    async def _finish(self) -> None:
+        await self._end_wa("session ended")
+        await self._close_pipe()
+        if self.wa_call:
+            self.engine.release_wa_call(self.wa_call.id, self)
+        if self.leg:
+            self.leg.stop()
+        if self.call.state == "ringing":
+            self.call.reject(480, "Temporarily Unavailable")
+        elif self.call.state != "ended":
+            await self.call.hangup("session ended")
+        self.phase = "ended"
+        self.engine.record(self, direction="integration-to-wa", pbx_party=self.caller)
+
+
+class TelerouterSession(Session):
+    """Incoming WhatsApp call -> ring telerouter's SIP address directly; bridge when it answers.
+
+    telerouter decides what happens (talk to its agent, ring a speaker, decline). When it doesn't
+    answer, a catch-all bridge of this account (if any) gets the call as usual.
+    """
+
+    kind = "wa-to-telerouter"
+
+    def __init__(self, engine: "Engine", wa_call: WaCall, runtime: WaRuntime, uri: str, fallback: Bridge | None):
+        super().__init__(engine, _integration_bridge(wa_call.account_id), runtime)
+        self.wa_call = wa_call
+        self.uri = uri
+        self.fallback = fallback
+        self.id = "wa-" + wa_call.id[:10]
+        self.peer_name = wa_call.peer.get("name") or ""
+        self.peer_number = wa_call.peer.get("number") or ""
+        if not self.peer_name:
+            self.peer_name = f"+{self.peer_number}" if self.peer_number else wa_call.peer_label()
+        self.call: Call | None = None
+        self.accepted = False
+        self.handed_off = False
+
+    async def run(self) -> None:
+        try:
+            await self._main()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("WhatsApp -> telerouter session failed")
+        finally:
+            await self._finish()
+
+    async def _main(self) -> None:
+        from .sip.message import SipUri
+        from .sip.ua import Account, AccountConfig
+        u = SipUri.parse(self.uri)
+        acc = Account(self.engine.ua, AccountConfig(
+            id="telerouter", server=u.host, port=u.port or 5060, username="wa2sip", password="",
+            display_name="WhatsApp", contact_user="wa-tr-" + secrets.token_hex(4)))
+        wid = self.wa_call.peer.get("number")
+        target = f"{self.wa_call.account_id}:{wid}@c.us" if wid else \
+            f"{self.wa_call.account_id}:{self.wa_call.peer.get('jid') or ''}"
+        asserted = ("+" + self.peer_number) if self.peer_number else None
+        self.phase = "ringing"
+        log.info("WhatsApp call from %s -> telerouter", self.peer_name)
+        try:
+            self.call = await acc.dial(self.uri, display_name=f"WA {self.peer_name}", asserted_user=asserted,
+                                       extra_headers=[("X-Telerouter-Target", target)])
+        except Exception as e:
+            log.warning("could not reach telerouter: %s", e)
+            self._hand_off()
+            return
+        call = self.call
+        deadline = time.monotonic() + 60
+        while call.state in ("init", "ringing"):
+            if not self.wa_call or self.wa_call.ended:
+                self.result = "WhatsApp caller hung up"
+                await call.hangup("WhatsApp caller gone")
+                return
+            if time.monotonic() > deadline:
+                await call.hangup("no answer")
+                break
+            try:
+                self.wa_call = await asyncio.wait_for(self.wa_events.get(), 0.2)
+            except TimeoutError:
+                pass
+        if call.state != "active":
+            log.info("telerouter did not take the WhatsApp call from %s (%s)", self.peer_name, call.end_reason)
+            self._hand_off()
+            return
+        self.leg = SipLeg(call, lambda d: None, self._phone_audio)
+        self.leg.start()
+        try:
+            self.accepted = True
+            await self.runtime.accept(self.wa_call.id)
+        except WaError as e:
+            log.warning("could not accept the WhatsApp call: %s", e)
+            self.result = f"accept failed: {e}"
+            await call.hangup("accept failed")
+            return
+        await self._open_pipe()
+        state = self.wa_call.state
+        while True:
+            if call.state != "active":
+                await self._end_wa("telerouter hung up")
+                return
+            if state == "active" and self.phase != "connected":
+                self.phase = "connected"
+                self.connected_at = time.time()
+                self.result = "connected"
+                self.leg.flush()
+                log.info("bridged WhatsApp %s <-> telerouter", self.peer_name)
+            if state in ("ended", "elsewhere"):
+                if self.phase != "connected":
+                    self.result = f"WhatsApp: {self.wa_call.reason}"
+                await call.hangup("WhatsApp call ended")
+                return
+            if self.phase != "connected" and time.time() - (call.answered_at or time.time()) > 30:
+                self.result = "WhatsApp did not connect"
+                await self._end_wa("did not connect")
+                return
+            try:
+                ev = await asyncio.wait_for(self.wa_events.get(), 0.25)
+                state = ev.state
+            except TimeoutError:
+                state = self.wa_call.state
+
+    def _hand_off(self) -> None:
+        self.result = "telerouter did not answer"
+        if self.fallback and self.wa_call and not self.wa_call.ended:
+            self.handed_off = True
+            self.engine.release_wa_call(self.wa_call.id, self)
+            self.engine.start_inbound(self.fallback, None, self.wa_call, self.runtime)
+
+    async def _finish(self) -> None:
+        if not self.handed_off:
+            if self.wa_call and (self.accepted or self.wa_call.state != "incoming"):
+                await self._end_wa("session ended")
+            if self.wa_call:
+                self.engine.release_wa_call(self.wa_call.id, self)
+        await self._close_pipe()
+        if self.leg:
+            self.leg.stop()
+        if self.call and self.call.state != "ended":
+            with contextlib.suppress(Exception):
+                await self.call.hangup("session ended")
+        self.phase = "ended"
+        if not self.handed_off:
+            self.engine.record(self, direction="wa-to-telerouter", pbx_party="telerouter")

@@ -62,6 +62,10 @@ class Settings:
     data_dir: str = field(default_factory=lambda: _env("DATA_DIR", "/data"))
     web_host: str = field(default_factory=lambda: _env("WEB_HOST", "0.0.0.0"))
     web_port: int = field(default_factory=lambda: _int("WEB_PORT", 8092))
+    # second listener with TLS (self-signed unless TLS_CERT/KEY are set); integrations use it. 0 = off
+    https_port: int = field(default_factory=lambda: _int("HTTPS_PORT", 8493))
+    tls_cert: str = field(default_factory=lambda: _env("TLS_CERT", ""))
+    tls_key: str = field(default_factory=lambda: _env("TLS_KEY", ""))
     sip_bind: str = field(default_factory=lambda: _env("SIP_BIND", "0.0.0.0"))
     sip_port: int = field(default_factory=lambda: _int("SIP_PORT", 5064))
     advertise_ip: str = field(default_factory=lambda: _env("ADVERTISE_IP", ""))

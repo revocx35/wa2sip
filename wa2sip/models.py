@@ -244,6 +244,12 @@ class AppSettings(BaseModel):
     default_voice: str = DEFAULT_VOICE
     default_speed: int = Field(default=150, ge=60, le=400)
     ringback_style: Literal["eu", "us", "uk"] = "eu"   # ring tone a PBX caller hears while WhatsApp rings
+    # integration API (telerouter): only the SHA-256 of the token is kept
+    integration_token_hash: str = ""
+    integration_token_created: float = 0.0
+    telerouter_uri: str = ""          # where to ring telerouter for incoming WhatsApp calls (set over the API)
+    telerouter_enabled: bool = False
+    telerouter_peer: str = ""         # IP that set it (shown in the UI)
 
 
 class Config(BaseModel):

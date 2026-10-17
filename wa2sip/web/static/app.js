@@ -1104,6 +1104,10 @@ pages.settings = async () => {
           <div class="form-actions"><button class="btn primary" type="submit">Change password</button></div>
         </form></div>
     </div>
+    <div class="card section"><h2>Integrations (telerouter)</h2>
+      <p class="muted">telerouter (an agentic smart-speaker and voice router) can list your WhatsApp contacts, call them directly over SIP, and take incoming WhatsApp calls. It connects to the HTTPS port with its own token, which reaches nothing but the integration API.</p>
+      <div id="integ"></div>
+    </div>
     <div class="card section"><h2>Automation API</h2>
       <p class="muted">Use this token for scripts and monitoring. Full API reference: <a href="/api/docs" target="_blank">/api/docs</a>.</p>
       <div class="toolbar"><input id="token" class="mono" readonly value="${esc(s.api_token)}" style="flex:1;min-width:240px">
@@ -1111,6 +1115,33 @@ pages.settings = async () => {
       <h3 style="margin-top:16px">Example: status of all WhatsApp accounts</h3>
       <pre class="logbox" style="height:auto;min-height:0">curl ${esc(origin)}/api/wa -H "Authorization: Bearer ${esc(s.api_token)}"</pre>
     </div>`;
+  const drawInteg = async () => {
+    const i = await api('GET', '/settings/integration');
+    const httpsUrl = i.https_port ? `https://${location.hostname}:${i.https_port}` : '';
+    $('#integ').innerHTML = `<dl class="kv">
+        <dt>Address for telerouter</dt><dd class="mono">${httpsUrl ? esc(httpsUrl) : badge('HTTPS off (WA2SIP_HTTPS_PORT)', 'warn')}</dd>
+        <dt>Certificate sha256</dt><dd class="mono small">${esc(i.tls_fingerprint || '-')}</dd>
+        <dt>Token</dt><dd>${i.token_set ? badge('set', 'ok') + ' <span class="muted small">' + esc(fmtTime(i.token_created)) + '</span>' : badge('none')}</dd>
+        <dt>Incoming WhatsApp calls</dt><dd>${i.telerouter_enabled ? badge('ring telerouter', 'ok') + ' <span class="muted small">' + esc(i.telerouter_peer) + '</span>' : badge('not routed to telerouter')}</dd>
+      </dl>
+      <div id="integ-new"></div>
+      <div class="toolbar"><button class="btn small" id="integ-token">${i.token_set ? 'Replace token' : 'Create token'}</button>
+        ${i.token_set ? '<button class="btn small danger" id="integ-revoke">Revoke</button>' : ''}</div>`;
+    $('#integ-token').onclick = e => {
+      if (i.token_set && !confirm('Replace the token? telerouter stops working until you paste the new one.')) return;
+      busy(e.target, async () => {
+        const r = await api('POST', '/settings/integration-token');
+        $('#integ-new').innerHTML = `<p>Copy this token into telerouter (Connections → Add wa2sip). It is shown only once.</p>
+          <div class="toolbar"><input id="integ-tok" class="mono" readonly value="${esc(r.token)}" style="flex:1;min-width:240px"><button class="btn small" id="integ-copy">Copy</button></div>`;
+        $('#integ-copy').onclick = () => { navigator.clipboard?.writeText(r.token); toast('Copied'); };
+      });
+    };
+    if ($('#integ-revoke')) $('#integ-revoke').onclick = e => {
+      if (!confirm('Revoke the integration token?')) return;
+      busy(e.target, async () => { await api('DELETE', '/settings/integration-token'); toast('Revoked', 'ok'); drawInteg(); });
+    };
+  };
+  drawInteg();
   $('#copy-token').onclick = () => { navigator.clipboard?.writeText($('#token').value); toast('Copied'); };
   $('#regen-token').onclick = e => {
     if (!confirm('Regenerate the API token? Existing integrations will stop working.')) return;

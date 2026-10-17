@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hmac
 import io
 import logging
@@ -13,12 +14,14 @@ import wave
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+from .. import integration
 from ..engine import Engine
 from ..logbuffer import LogBuffer
 from ..media import piper as piper_mod
@@ -27,7 +30,7 @@ from ..models import SECRET_FIELDS, Bridge, Extension, Pbx, WaAccount, redact
 from ..settings import Settings
 from ..store import Store
 from ..wa.base import WaError
-from . import auth
+from . import auth, tls
 
 log = logging.getLogger("wa2sip.web")
 STATIC = Path(__file__).parent / "static"
@@ -124,13 +127,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         cfg.settings.admin_password_hash = auth.hash_password(settings.admin_password)
         store.save()
 
+    tls_state = {"cert": "", "fingerprint": ""}
+
+    async def start_https(asgi_app):
+        """Second listener with TLS (same app), for the integration API and a TLS web UI."""
+        if not settings.https_port:
+            return None
+        pair = tls.ensure_certificate(settings.data_dir, settings.tls_cert, settings.tls_key)
+        if not pair:
+            return None
+        tls_state["cert"], tls_state["fingerprint"] = pair[0], tls.fingerprint(pair[0])
+        config = uvicorn.Config(asgi_app, host=settings.web_host, port=settings.https_port,
+                                ssl_certfile=pair[0], ssl_keyfile=pair[1], lifespan="off",
+                                log_config=None, access_log=False, proxy_headers=False,
+                                timeout_graceful_shutdown=3)
+        server = _NoSignalServer(config)
+        task = asyncio.create_task(server.serve())
+        for _ in range(50):
+            if server.started or task.done():
+                break
+            await asyncio.sleep(0.05)
+        if task.done():
+            log.warning("HTTPS listener on :%d failed to start", settings.https_port)
+            return None
+        log.info("HTTPS on port %d (certificate sha256 %s)", settings.https_port, tls_state["fingerprint"])
+        return server, task
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         log.info("wa2sip %s starting (web :%d, sip udp :%d, rtp %d-%d, whatsapp driver %s)", settings.version,
                  settings.web_port, settings.sip_port, settings.rtp_port_min, settings.rtp_port_max,
                  settings.wa_driver)
         await engine.start()
+        https = await start_https(_app)
         yield
+        if https:
+            https[0].should_exit = True
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(https[1], 5)
         await engine.stop()
 
     app = FastAPI(title="wa2sip", version=settings.version, lifespan=lifespan,
@@ -150,7 +184,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.middleware("http")
     async def require_auth(request: Request, call_next):
         path = request.url.path
-        if path.startswith("/api/"):
+        if path.startswith("/api/integration/v1/"):
+            pass                        # own token auth (integration.router), never the admin session
+        elif path.startswith("/api/"):
             if cross_site(request.headers, request.method):
                 return JSONResponse({"detail": "cross-site request refused"}, status_code=403)
             if path not in PUBLIC and not authed(request):
@@ -702,6 +738,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         store.save()
         return {"api_token": cfg.settings.api_token}
 
+    # -- integrations (telerouter) ------------------------------------------------------------------------
+    app.include_router(integration.router(engine, store))
+
+    @app.get("/api/settings/integration")
+    async def integration_status():
+        s = cfg.settings
+        return {"token_set": bool(s.integration_token_hash), "token_created": s.integration_token_created,
+                "telerouter_enabled": s.telerouter_enabled, "telerouter_peer": s.telerouter_peer,
+                "https_port": settings.https_port if tls_state["cert"] else 0,
+                "tls_fingerprint": tls_state["fingerprint"]}
+
+    @app.post("/api/settings/integration-token")
+    async def integration_token():
+        token = integration.new_token()
+        cfg.settings.integration_token_hash = integration.token_hash(token)
+        cfg.settings.integration_token_created = time.time()
+        store.save()
+        log.info("integration token created (the previous one, if any, stops working)")
+        return {"token": token}
+
+    @app.delete("/api/settings/integration-token")
+    async def integration_token_revoke():
+        s = cfg.settings
+        s.integration_token_hash = ""
+        s.telerouter_enabled = False
+        store.save()
+        log.info("integration token revoked")
+        return {"ok": True}
+
     # -- UI ----------------------------------------------------------------------------------------------
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
@@ -710,3 +775,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
 
     return app
+
+
+class _NoSignalServer(uvicorn.Server):
+    """uvicorn server that leaves signal handling to the main server."""
+
+    @contextlib.contextmanager
+    def capture_signals(self):
+        yield
