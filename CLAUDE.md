@@ -15,7 +15,7 @@ IVR lists the bridge's contacts when you call the extension. One Docker Compose 
 Read [ARCHITECTURE.md](ARCHITECTURE.md) before changing call or media code (process model, call flows,
 audio pipeline, routing). WhatsApp Web module details: [docs/whatsapp-web-internals.md](docs/whatsapp-web-internals.md).
 
-## Status: what is verified and what isn't (v0.2.0, 2026-10-03)
+## Status: what is verified and what isn't (v0.3.0, 2026-10-17)
 
 Verified on the dev host (and in CI):
 - PBX side end to end against Asterisk 20 (`tools/e2e_fake.py`): registration, menu, RFC 4733 DTMF,
@@ -23,6 +23,8 @@ Verified on the dev host (and in CI):
   bridge PINs in both directions (v0.2.0).
 - Audio path Chromium ↔ PulseAudio ↔ parec/pacat (`tools/audio_loopback.py`), sandbox on and off:
   ~100 ms, no level loss.
+- telerouter integration (v0.3.0): integration API, one-time direct calls both ways and the catch-all
+  fallback (`tests/test_integration.py`), and live against telerouter with simulated WhatsApp.
 - Real WhatsApp Web loads, shows a QR (also in the UI), the call monitor installs, and every module
   wa2sip uses exists (`agent/probe.js`). SharedArrayBuffer/crossOriginIsolated/RTCPeerConnection are
   all true.
@@ -165,6 +167,12 @@ ARCHITECTURE.md §2 has the full code map. In short: `wa2sip/` (Python engine: `
   close the browser, `ready` may never fire, `getChats()` breaks on current builds.
 - Piper downloads the default voice (`en_US-lessac-medium`, 63 MB) at the first start. Tests never
   download (conftest makes the catalog unavailable).
+
+## telerouter integration (v0.3.0)
+
+`wa2sip/integration.py` + `DirectSession`/`TelerouterSession` in sessions.py. The integration API is HTTPS
+only (`request.url.scheme`), skips the admin-session middleware and checks its own token (SHA-256 in
+`AppSettings.integration_token_hash`). Keep docs/integration-api.md identical to telerouter's copy.
 
 ## Release
 

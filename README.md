@@ -113,6 +113,20 @@ Examples:
 - *Per person:* bridge A (extension `1009`) with Mom and Dad ringing `1001`; bridge B (extension
   `1010`) with work contacts ringing `2001`. Or one bridge where each contact has its own *Rings*.
 
+## telerouter
+
+[telerouter](https://github.com/revocx35/telerouter) (an agentic smart-speaker manager and voice router)
+can use wa2sip without a PBX in between: it lists your WhatsApp contacts, calls them directly ("hey Jarvis,
+call my dad"), and takes incoming WhatsApp calls (to talk to your AI agent or ring a speaker).
+
+1. **Settings → Integrations → Create token** (shown once; it reaches only the integration API).
+2. In telerouter: **Connections → Add wa2sip**, URL `https://<wa2sip-host>:8493`, the token, and pin the
+   certificate (its SHA-256 is shown on the same Settings card).
+
+Incoming WhatsApp calls go to telerouter when it asks for them, unless a bridge lists the caller
+explicitly; a catch-all bridge stays the fallback when telerouter doesn't answer. API:
+[docs/integration-api.md](docs/integration-api.md).
+
 ## Voices
 
 Prompts are spoken by Piper neural voices (natural sounding, offline, many languages including
@@ -127,6 +141,7 @@ Environment variables (`.env`, see [.env.example](.env.example)):
 | Variable | Default | Meaning |
 |---|---|---|
 | `WEB_PORT` | `8092` | Web UI / API port |
+| `HTTPS_PORT` | `8493` | Same app over HTTPS (self-signed or `TLS_CERT`/`TLS_KEY`); integrations use it. `0` = off |
 | `ADMIN_PASSWORD` | – | First admin password (otherwise set on first visit) |
 | `SIP_PORT` | `5064` | Local UDP port for SIP (all extensions share it) |
 | `RTP_PORT_MIN` / `MAX` | `17000` / `17199` | RTP audio ports |

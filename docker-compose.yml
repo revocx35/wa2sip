@@ -28,6 +28,7 @@ services:
     shm_size: 512m
     environment:
       WA2SIP_WEB_PORT: ${WEB_PORT:-8092}
+      WA2SIP_HTTPS_PORT: ${HTTPS_PORT:-8493}
       WA2SIP_SIP_PORT: ${SIP_PORT:-5064}
       WA2SIP_RTP_PORT_MIN: ${RTP_PORT_MIN:-17000}
       WA2SIP_RTP_PORT_MAX: ${RTP_PORT_MAX:-17199}

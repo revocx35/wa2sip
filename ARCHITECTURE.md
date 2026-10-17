@@ -67,7 +67,9 @@ wa2sip/
   sip/               SIP stack from cam-to-sip (message, auth, sdp, stack, ua); ua.dial() adds per-call
                      display name + P-Asserted-Identity
   media/             g711, rtp (Pacer jitter buffer), dtmf (Goertzel), tts (+ piper.py), tones (ringback)
-  web/               FastAPI app (auth, API, static UI), auth.py (scrypt, sessions, LoginThrottle), static/ (vanilla JS SPA)
+  integration.py     integration API v1 for telerouter: token auth, targets, one-time call tickets, inbound address
+  web/               FastAPI app (auth, API, static UI), auth.py (scrypt, sessions, LoginThrottle), tls.py
+                     (self-signed certificate for the HTTPS listener), static/ (vanilla JS SPA)
 agent/
   index.js           the per-account agent: whatsapp-web.js client, QR/pairing, commands, events
   page.js            code injected into WhatsApp Web: call monitor, dial/accept/reject/hangup, contacts, diag
@@ -288,6 +290,32 @@ sequenceDiagram
   `trust_id_inbound=yes` (FreePBX: *Trust RPID/PAI*). The e2e test PBX shows both behaviours.
 - Cleanup never declines a call we didn't accept (`accepted` flag); an accepted call is hung up
   with `endCall`, never `rejectCall`.
+
+### 5.3 Integration calls (telerouter, `integration.py`)
+
+```mermaid
+sequenceDiagram
+    participant T as telerouter
+    participant E as wa2sip
+    participant W as WhatsApp Web
+    T->>E: POST /api/integration/v1/calls {target} (HTTPS, integration token)
+    E-->>T: {"sip_uri": "sip:tr<128-bit>@wa2sip:5064"}  (single use, 30 s, bound to T's IP)
+    T->>E: INVITE sip:tr…@wa2sip:5064
+    E->>W: dial
+    E-->>T: 180 Ringing (WhatsApp rings)
+    W-->>E: active
+    E-->>T: 200 OK  (DirectSession bridges the audio)
+```
+
+- `UserAgent.direct_resolver` maps the one-time user part to a transient, non-registering account
+  (`Engine._ticket_account`); `Engine.on_incoming` takes the ticket (single use, same source IP) and starts
+  a `DirectSession`. Failures become SIP statuses: 486 busy, 404 not on WhatsApp, 603 declined, 480 other.
+- Incoming: `PUT /api/integration/v1/inbound` stores telerouter's SIP address. `Engine.on_wa_call` sends a
+  call to telerouter (`TelerouterSession`: direct INVITE with `P-Asserted-Identity: +<number>` and
+  `X-Telerouter-Target: <account>:<number>@c.us`) unless a bridge lists the caller explicitly; if
+  telerouter doesn't answer, the account's catch-all bridge gets the call (`Engine.start_inbound`).
+- The API needs its own token (SHA-256 stored, Settings → Integrations) and HTTPS (`WA2SIP_HTTPS_PORT`,
+  self-signed by `web/tls.py`; telerouter pins the certificate). Details: [docs/integration-api.md](docs/integration-api.md).
 
 ## 6. Routing rules (`store.py`)
 
