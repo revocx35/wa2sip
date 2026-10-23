@@ -20,6 +20,7 @@ for (const k of ['log', 'info', 'warn', 'error', 'debug']) {
 const QRCode = require('qrcode');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const { installPageApi, rawMicrophone } = require('./page');
+const { shouldReportLoading, isStalled } = require('./readiness');
 
 const env = process.env;
 const ACCOUNT = env.WA2SIP_ACCOUNT || 'default';
@@ -30,6 +31,7 @@ const HEADLESS = env.WA2SIP_HEADLESS === '1';
 const RAW_MIC = env.WA2SIP_RAW_MIC !== '0';
 const TRACE = env.WA2SIP_TRACE === '1';
 const READY_FALLBACK_MS = 90000;
+const HEALTH_CHECK_MS = 30000;
 
 function send(obj) {
     process.stdout.write(JSON.stringify(obj) + '\n');
@@ -38,14 +40,17 @@ function log(level, msg) {
     send({ event: 'log', level, msg: String(msg) });
 }
 function setState(state, detail) {
+    stateName = state;
     send({ event: 'state', state, detail: detail || '' });
 }
 
 let client = null;
 let page = null;
 let ready = false;
+let stateName = 'loading';
 let shuttingDown = false;
 let readyFallback = null;
+let healthTimer = null;
 
 // -- browser -------------------------------------------------------------------------------
 function chromiumArgs() {
@@ -224,6 +229,31 @@ async function onReady() {
     setState('ready');
 }
 
+/**
+ * The page is the only truth about the session. A 'ready' that never arrives (or one a late
+ * 'loading_screen' overwrote) must not leave the bridge refusing calls: if WhatsApp Web says the
+ * socket is CONNECTED while we are not ready, run the normal ready path again.
+ */
+async function checkHealth() {
+    if (ready || shuttingDown || !page) return;
+    if (stateName === 'qr' || stateName === 'failed') return;   // these wait for a human
+    let socket = null;
+    try {
+        const diag = await pageCall('diag');
+        socket = diag ? diag.socket || null : null;
+    } catch (e) {
+        return;     // the page is not answering yet: a normal start-up, leave it alone
+    }
+    if (!isStalled({ ready, state: stateName, socket, shuttingDown })) return;
+    log('warn', `WhatsApp Web reports CONNECTED but the session is still '${stateName}' - recovering without a restart`);
+    try {
+        await onReady();
+        log('info', 'recovered: WhatsApp is ready again');
+    } catch (e) {
+        log('error', 'ready recovery failed: ' + e.message);
+    }
+}
+
 async function start() {
     fs.mkdirSync(PROFILE_DIR, { recursive: true, mode: 0o700 });
     removeStaleLocks();
@@ -257,7 +287,13 @@ async function start() {
         }
     });
     client.on('code', (code) => send({ event: 'pairing_code', code }));
-    client.on('loading_screen', (percent) => setState('loading', `syncing ${percent}%`));
+    client.on('loading_screen', (percent) => {
+        // After a page reload (WhatsApp Web ships a new build almost daily) whatsapp-web.js can
+        // report sync progress *after* 'ready'. Reporting it then left the engine stuck on
+        // 'loading' and it answered "WhatsApp is not connected" to every call (2026-10-23).
+        if (!shouldReportLoading(ready)) return;
+        setState('loading', `syncing ${percent}%`);
+    });
     client.on('authenticated', () => {
         setState('authenticated', 'loading chats');
         if (!readyFallback) {
@@ -283,6 +319,10 @@ async function start() {
         log('warn', 'WhatsApp disconnected: ' + reason);
         setState(reason === 'LOGOUT' ? 'loading' : 'disconnected', String(reason));
     });
+
+    // Never trust a single event to describe the session: re-check it while it is not ready.
+    healthTimer = setInterval(() => { void checkHealth(); }, HEALTH_CHECK_MS);
+    if (healthTimer.unref) healthTimer.unref();
 
     const init = client.initialize();
     init.catch(() => {});
