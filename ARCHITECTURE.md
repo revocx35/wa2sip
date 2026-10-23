@@ -115,11 +115,12 @@ Commands: `contacts`, `lookup`, `dial`, `accept`, `reject`, `hangup`, `diagnosti
 - The event order is not trusted (`agent/readiness.js`): a `loading_screen` that arrives after
   `ready` — normal after a page reload, and WhatsApp Web reloads when it ships a new build — is
   ignored instead of pulling the state back to `loading`, and while the agent is not ready a 30 s
-  health check asks the page for `WAWebSocketModel.Socket.state`; if it is `CONNECTED` the agent
-  runs the ready path again and logs `recovered: WhatsApp is ready again`. Without this a late
-  event left the bridge answering "WhatsApp is not connected" to every call with a healthy,
-  logged-in page (2026-10-23). `qr` and `failed` are never recovered automatically: they need a
-  human.
+  health check asks the page for `WAWebSocketModel.Socket.state`; after two consecutive checks
+  (~60 s) with the page `CONNECTED`, the agent runs the ready path again and logs
+  `recovered: WhatsApp is ready again`. Two checks, not one: a normal start-up is briefly
+  "connected but not ready" and must not be mistaken for a stall. Without this a late event left
+  the bridge answering "WhatsApp is not connected" to every call with a healthy, logged-in page
+  (2026-10-23). `qr` and `failed` are never recovered automatically: they need a human.
 - **Unlink** calls `WAWebSocketModel.Socket.logout()` in the page; `client.logout()` would close the
   browser.
 - The agent removes stale `Singleton*` locks before start (Chromium crashed, container killed).

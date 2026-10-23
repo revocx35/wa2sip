@@ -20,7 +20,7 @@ for (const k of ['log', 'info', 'warn', 'error', 'debug']) {
 const QRCode = require('qrcode');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const { installPageApi, rawMicrophone } = require('./page');
-const { shouldReportLoading, isStalled } = require('./readiness');
+const { shouldReportLoading, isStalled, foldStall } = require('./readiness');
 
 const env = process.env;
 const ACCOUNT = env.WA2SIP_ACCOUNT || 'default';
@@ -51,6 +51,7 @@ let stateName = 'loading';
 let shuttingDown = false;
 let readyFallback = null;
 let healthTimer = null;
+let stalls = 0;
 
 // -- browser -------------------------------------------------------------------------------
 function chromiumArgs() {
@@ -235,8 +236,14 @@ async function onReady() {
  * socket is CONNECTED while we are not ready, run the normal ready path again.
  */
 async function checkHealth() {
-    if (ready || shuttingDown || !page) return;
-    if (stateName === 'qr' || stateName === 'failed') return;   // these wait for a human
+    if (ready || shuttingDown || !page) {
+        stalls = 0;
+        return;
+    }
+    if (stateName === 'qr' || stateName === 'failed') {
+        stalls = 0;
+        return;     // these wait for a human
+    }
     let socket = null;
     try {
         const diag = await pageCall('diag');
@@ -244,7 +251,10 @@ async function checkHealth() {
     } catch (e) {
         return;     // the page is not answering yet: a normal start-up, leave it alone
     }
-    if (!isStalled({ ready, state: stateName, socket, shuttingDown })) return;
+    const folded = foldStall(stalls, isStalled({ ready, state: stateName, socket, shuttingDown }));
+    stalls = folded.count;
+    if (!folded.recover) return;
+    stalls = 0;
     log('warn', `WhatsApp Web reports CONNECTED but the session is still '${stateName}' - recovering without a restart`);
     try {
         await onReady();

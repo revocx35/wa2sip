@@ -31,4 +31,19 @@ function isStalled(s) {
     return s.state !== 'qr' && s.state !== 'failed';
 }
 
-module.exports = { shouldReportLoading, isStalled };
+/** Two checks in a row, ~60 s: one is not enough, a normal start-up can look stalled for a moment. */
+const STALL_CHECKS = 2;
+
+/**
+ * Folds one health check into the stall counter.
+ *
+ * @param {number} count      the previous counter
+ * @param {boolean} stalled  result of isStalled() for this check
+ * @returns {{count: number, recover: boolean}} recover only after consecutive stalls
+ */
+function foldStall(count, stalled) {
+    const next = stalled ? count + 1 : 0;
+    return { count: next, recover: next >= STALL_CHECKS };
+}
+
+module.exports = { shouldReportLoading, isStalled, foldStall, STALL_CHECKS };
