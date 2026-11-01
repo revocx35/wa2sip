@@ -363,7 +363,7 @@ FastAPI serves `/api/*` and a vanilla-JS SPA (`web/static`, no build step). Auth
 from cam-to-sip:
 
 - scrypt password hash; HMAC session cookie bound to the hash (a password change logs everyone out);
-  `SameSite=strict`; `Secure` behind a trusted HTTPS proxy.
+  `SameSite=strict`; on HTTPS (the own TLS listener or a trusted HTTPS proxy) it is `__Host-wa2sip_session` with `Secure`, so it never reaches the plain-HTTP port and does not shadow that port's own `wa2sip_session` cookie.
 - Bearer API token for automations.
 - `LoginThrottle` per IP and per account (charged before scrypt, refunded on success).
 - Fetch-metadata cross-site refusal.

@@ -13,7 +13,7 @@ Anyone who can use the web UI can list your WhatsApp contacts and make WhatsApp 
 
 - One admin password, scrypt-hashed (N=2^14). New passwords need 10 characters.
 - Session cookie: HMAC-signed, bound to the password hash (a password change logs out all sessions),
-  `HttpOnly`, `SameSite=strict`, `Secure` behind a trusted HTTPS proxy (`SECURE_COOKIES=auto`).
+  `HttpOnly`, `SameSite=strict`, `Secure` on HTTPS: the own TLS listener or a trusted HTTPS proxy (`SECURE_COOKIES=auto`).
 - Brute-force throttle per client IP (5 free failures, then 30 s doubling to 1 h) and per account
   (after 50 failures from anywhere, one try per lock period). Locked attempts get `429`.
 - Cross-site requests are refused (Fetch Metadata), which also covers sibling subdomains and the

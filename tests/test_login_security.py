@@ -126,6 +126,19 @@ def test_cookie_is_secure_behind_https_proxy(app):
     assert "secure" not in r.headers["set-cookie"].lower()
 
 
+def test_cookie_is_secure_on_the_own_https_listener(app):
+    # the second (TLS) listener serves the same app: a login there must get a Secure cookie, or the
+    # browser would also send it to the plain-HTTP port of the same host
+    direct = TestClient(app, base_url="https://testserver", client=("192.168.1.51", 50000))
+    cookie = login(direct, PASSWORD).headers["set-cookie"]
+    assert cookie.startswith("__Host-wa2sip_session=") and "secure" in cookie.lower()
+    assert direct.get("/api/session").json()["authenticated"] is True
+    # ... and the plain-HTTP port keeps its own cookie (a Secure one of the same name would shadow it)
+    plain = client_at(app, "192.168.1.52")
+    assert login(plain, PASSWORD).headers["set-cookie"].startswith("wa2sip_session=")
+    assert plain.get("/api/session").json()["authenticated"] is True
+
+
 def test_new_passwords_need_ten_characters(app):
     c = client_at(app, "192.168.1.60")
     assert login(c, PASSWORD).status_code == 200

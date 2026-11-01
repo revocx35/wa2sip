@@ -8,6 +8,7 @@ import secrets
 import time
 
 COOKIE = "wa2sip_session"
+SECURE_COOKIE = "__Host-wa2sip_session"     # the HTTPS one: never sent to the plain-HTTP port
 SESSION_TTL = 7 * 24 * 3600
 
 

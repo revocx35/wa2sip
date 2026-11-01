@@ -152,7 +152,7 @@ Environment variables (`.env`, see [.env.example](.env.example)):
 | `WA_DRIVER` | `chromium` | `fake` = simulated WhatsApp accounts, to try the PBX side without WhatsApp |
 | `CHROMIUM_SANDBOX` | `auto` | Chromium's sandbox (needs `seccomp-chromium.json`, see [security](docs/security.md)) |
 | `TRUSTED_PROXIES` | `private` | Reverse proxies allowed to set `X-Forwarded-For` |
-| `SECURE_COOKIES` | `auto` | `Secure` cookie flag behind an HTTPS proxy |
+| `SECURE_COOKIES` | `auto` | `Secure` cookie flag on HTTPS (the own TLS port or a trusted HTTPS proxy) |
 
 Everything else (PBX, extensions, accounts, bridges, voices) is configured in the web UI and stored
 in the `wa2sip-data` volume (`/data`). The WhatsApp sessions live there too, so updates and restarts
