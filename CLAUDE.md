@@ -12,7 +12,8 @@ devices that wa2sip connects to SIP/RTP calls on extensions it registers on the 
 IVR lists the bridge's contacts when you call the extension. One Docker Compose service, web UI on
 :8092.
 
-Read [ARCHITECTURE.md](ARCHITECTURE.md) before changing call or media code (process model, call flows,
+**Required reading:** [AGENTS.md](AGENTS.md) (commands, conventions, never-do list, gotchas) and
+[ARCHITECTURE.md](ARCHITECTURE.md). Read ARCHITECTURE.md before changing call or media code (process model, call flows,
 audio pipeline, routing). WhatsApp Web module details: [docs/whatsapp-web-internals.md](docs/whatsapp-web-internals.md).
 
 ## Status: what is verified and what isn't (v0.3.0, 2026-10-17)
@@ -161,6 +162,11 @@ ARCHITECTURE.md §2 has the full code map. In short: `wa2sip/` (Python engine: `
 - InboundSession cleanup must not decline a WhatsApp call it never accepted (e.g. the extension is
   not registered): leave it ringing on the phone. An accepted call is ended with `endCall`
   (`hangup`), never `rejectCall`.
+- **`ready` is not forever**: the WhatsApp Web renderer can be OOM-killed or freeze days later (it grew
+  to ~850 MB in 15 days in a 2 GiB container; 2026-11-16). Puppeteer then emits page `error`
+  ("Page crashed!") and every `page.evaluate` hangs until protocolTimeout. The agent restarts itself on
+  the crash event and on two failed 30 s liveness probes (`restartAgent()`, readiness.js). Diagnose with
+  the host kernel log (`journalctl -k | grep -i oom`) and the chats' `call_log` messages over CDP.
 - whatsapp-web.js is pinned to a GitHub commit (tarball URL in agent/package.json) because npm's
   1.34.7 predates fixes for WhatsApp Web's 2026 changes (`id._serialized` → `$1`, LIDs). The owner's
   wa_logger notes (docs/wwebjs-notes.md there) list more wwebjs pitfalls: `destroy()`/`logout()`

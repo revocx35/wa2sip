@@ -20,7 +20,7 @@ for (const k of ['log', 'info', 'warn', 'error', 'debug']) {
 const QRCode = require('qrcode');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const { installPageApi, rawMicrophone } = require('./page');
-const { shouldReportLoading, isStalled, foldStall } = require('./readiness');
+const { shouldReportLoading, isStalled, foldStall, withTimeout, foldDeadTab } = require('./readiness');
 
 const env = process.env;
 const ACCOUNT = env.WA2SIP_ACCOUNT || 'default';
@@ -32,6 +32,7 @@ const RAW_MIC = env.WA2SIP_RAW_MIC !== '0';
 const TRACE = env.WA2SIP_TRACE === '1';
 const READY_FALLBACK_MS = 90000;
 const HEALTH_CHECK_MS = 30000;
+const LIVENESS_TIMEOUT_MS = 15000;
 
 function send(obj) {
     process.stdout.write(JSON.stringify(obj) + '\n');
@@ -52,6 +53,7 @@ let shuttingDown = false;
 let readyFallback = null;
 let healthTimer = null;
 let stalls = 0;
+let deadChecks = 0;
 
 // -- browser -------------------------------------------------------------------------------
 function chromiumArgs() {
@@ -95,6 +97,9 @@ function removeStaleLocks() {
 async function onPage(p) {
     page = p;
     page.on('pageerror', (e) => TRACE && log('debug', 'page error: ' + e.message));
+    // the renderer died (OOM kill, crash): the tab shows "Aw, Snap!" and answers nothing any more
+    page.on('error', (e) => restartAgent('the WhatsApp Web tab crashed (' + ((e && e.message) || e) + ')'));
+    page.on('close', () => restartAgent('the WhatsApp Web tab was closed'));
     page.on('framenavigated', (frame) => {
         if (frame === page.mainFrame()) {
             ready = false;
@@ -236,10 +241,20 @@ async function onReady() {
  * socket is CONNECTED while we are not ready, run the normal ready path again.
  */
 async function checkHealth() {
-    if (ready || shuttingDown || !page) {
+    if (shuttingDown || !page) {
         stalls = 0;
+        deadChecks = 0;
         return;
     }
+    if (ready) {
+        stalls = 0;
+        const dead = foldDeadTab(deadChecks, await pageAlive());
+        deadChecks = dead.count;
+        if (dead.count === 1) log('warn', 'the WhatsApp Web tab did not answer the health check');
+        if (dead.restart) restartAgent('the WhatsApp Web tab stopped answering');
+        return;
+    }
+    deadChecks = 0;
     if (stateName === 'qr' || stateName === 'failed') {
         stalls = 0;
         return;     // these wait for a human
@@ -262,6 +277,36 @@ async function checkHealth() {
     } catch (e) {
         log('error', 'ready recovery failed: ' + e.message);
     }
+}
+
+/** Does the tab still run JavaScript, with wa2sip's call monitor in it? Never waits on a dead tab. */
+async function pageAlive() {
+    if (!page || page.isClosed()) return false;
+    return withTimeout(ensurePageApi(), LIVENESS_TIMEOUT_MS, false);
+}
+
+/**
+ * A dead tab can't be repaired from here reliably (page.reload() on a crashed or frozen renderer
+ * may hang too). Exit instead: the engine restarts the agent with a fresh Chromium, which also
+ * gives back the memory WhatsApp Web leaked over the days.
+ */
+function restartAgent(why) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    ready = false;
+    log('error', why + ' - restarting the WhatsApp agent');
+    setState('disconnected', why);
+    const browser = client && client.pupBrowser;
+    const closed = browser ? browser.close() : Promise.resolve();
+    withTimeout(closed, 10000, null).finally(() => {
+        try {
+            const proc = browser && browser.process();
+            if (proc && proc.exitCode === null) proc.kill('SIGKILL');
+        } catch (e) {
+            /* gone */
+        }
+        process.exit(3);
+    });
 }
 
 async function start() {
@@ -330,7 +375,8 @@ async function start() {
         setState(reason === 'LOGOUT' ? 'loading' : 'disconnected', String(reason));
     });
 
-    // Never trust a single event to describe the session: re-check it while it is not ready.
+    // Never trust a single event to describe the session: re-check it while it is not ready, and
+    // check that a ready tab is still alive (a crashed or frozen renderer emits nothing).
     healthTimer = setInterval(() => { void checkHealth(); }, HEALTH_CHECK_MS);
     if (healthTimer.unref) healthTimer.unref();
 
@@ -434,6 +480,7 @@ rl.on('close', () => {
 process.on('unhandledRejection', (e) => log('debug', 'unhandled: ' + ((e && e.stack) || e)));
 
 start().catch((e) => {
+    if (shuttingDown) return;     // restartAgent()/shutdown already tore the browser down and exit
     log('error', 'WhatsApp Web failed to start: ' + ((e && e.message) || e));
     setState('failed', String((e && e.message) || e));
     process.exit(2);

@@ -121,6 +121,17 @@ Commands: `contacts`, `lookup`, `dial`, `accept`, `reject`, `hangup`, `diagnosti
   "connected but not ready" and must not be mistaken for a stall. Without this a late event left
   the bridge answering "WhatsApp is not connected" to every call with a healthy, logged-in page
   (2026-10-23). `qr` and `failed` are never recovered automatically: they need a human.
+- **A ready tab is watched too** (v0.3.3). `ready` only means WhatsApp Web loaded once: the tab's
+  renderer can later be OOM-killed or freeze, and then nothing at all arrives — no incoming calls,
+  `dial` hangs — while the agent still says `ready` (2026-11-16: renderer OOM-killed after 15 days
+  at ~850 MB in a 2 GiB container; 7 hours of missed calls). The agent therefore (a) treats
+  puppeteer's page `error` ("Page crashed!") and `close` events as fatal and (b) probes a ready tab
+  every 30 s (`ensurePageApi()` with a 15 s timeout, `withTimeout`/`foldDeadTab` in readiness.js);
+  two failed probes in a row (~60 s) are fatal. Fatal = `restartAgent()`: close Chromium (SIGKILL
+  after 10 s), exit 3; the engine starts a fresh agent and Chromium, which also returns the memory
+  WhatsApp Web leaked. Reloading the tab in place was rejected: `page.reload()` on a dead renderer
+  can hang as well. The engine's restart backoff (3 s doubling to 120 s) restarts at 3 s when the
+  agent had run for more than 10 min (`HEALTHY_RUN`), so a crash after days is not treated as a loop.
 - **Unlink** calls `WAWebSocketModel.Socket.logout()` in the page; `client.logout()` would close the
   browser.
 - The agent removes stale `Singleton*` locks before start (Chromium crashed, container killed).

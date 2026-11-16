@@ -20,6 +20,12 @@ send({"event": "qr", "qr": "data:image/png;base64,AAAA"})
 if os.environ.get("FAKE_AGENT_CRASH") and not os.path.exists(os.environ["FAKE_AGENT_CRASH"]):
     open(os.environ["FAKE_AGENT_CRASH"], "w").close()
     sys.exit(5)
+if os.environ.get("FAKE_AGENT_CRASHES"):            # crash this many times: "<counter file>:<n>"
+    counter, n = os.environ["FAKE_AGENT_CRASHES"].rsplit(":", 1)
+    done = int(open(counter).read()) if os.path.exists(counter) else 0
+    if done < int(n):
+        open(counter, "w").write(str(done + 1))
+        sys.exit(3)
 send({"event": "me", "me": {"id": "490000@c.us", "number": "490000"}})
 send({"event": "state", "state": "ready"})
 send({"event": "log", "level": "info", "msg": "fake agent ready"})

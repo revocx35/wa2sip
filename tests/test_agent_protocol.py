@@ -87,6 +87,28 @@ async def test_agent_is_restarted_after_a_crash(runtime, tmp_path, monkeypatch):
         await runtime.stop()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("healthy_run", "expected"), [(1e9, [3.0, 6.0, 12.0]), (0.0, [3.0, 3.0, 3.0])])
+async def test_restart_backoff_resets_after_a_healthy_run(runtime, tmp_path, monkeypatch, healthy_run, expected):
+    """A tab crash after days of running (OOM kill, 2026-11-16) must not inherit a crash loop's backoff."""
+    monkeypatch.setenv("FAKE_AGENT_CRASHES", f"{tmp_path / 'crashes'}:3")
+    monkeypatch.setattr("wa2sip.wa.agent.HEALTHY_RUN", healthy_run)
+    delays = []
+
+    async def record(delay, *a, **kw):
+        delays.append(delay)
+        await _real_sleep(0.01)
+
+    monkeypatch.setattr("wa2sip.wa.agent.asyncio.sleep", record)
+    await runtime.start()
+    try:
+        assert await wait_for(lambda: runtime.state == "ready", 10)
+        assert runtime.restarts == 3
+        assert [d for d in delays if d >= 1][:3] == expected   # asyncio.sleep is patched for everyone
+    finally:
+        await runtime.stop()
+
+
 _real_sleep = asyncio.sleep
 
 

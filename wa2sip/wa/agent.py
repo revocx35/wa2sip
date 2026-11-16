@@ -22,6 +22,7 @@ import contextlib
 import json
 import logging
 import os
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from .system import System
 log = logging.getLogger("wa2sip.wa")
 
 RPC_TIMEOUT = 45.0
+HEALTHY_RUN = 600.0               # s: an agent that ran this long and then exited is restarted quickly
 
 
 def call_from_snapshot(account_id: str, snap: dict) -> WaCall:
@@ -72,6 +74,7 @@ class AgentRuntime(WaRuntime):
     async def _run(self) -> None:
         backoff = 3.0
         while not self._stopping:
+            started = time.monotonic()
             try:
                 await self._spawn()
                 assert self.proc
@@ -88,6 +91,8 @@ class AgentRuntime(WaRuntime):
             if self._stopping:
                 break
             self.restarts += 1
+            if time.monotonic() - started > HEALTHY_RUN:
+                backoff = 3.0             # a crash after days of running is not a crash loop
             self.set_state("failed", f"agent exited ({rc}); restarting")
             log.warning("[%s] WhatsApp agent exited (%s) - restarting in %.0f s", self.name, rc, backoff)
             await asyncio.sleep(backoff)

@@ -9,7 +9,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
-const { shouldReportLoading, isStalled, foldStall } = require('../readiness');
+const { shouldReportLoading, isStalled, foldStall, withTimeout, foldDeadTab } = require('../readiness');
 
 test('a late loading_screen does not pull a ready session back to loading', () => {
     assert.equal(shouldReportLoading(true), false);
@@ -52,4 +52,29 @@ test('index.js wires the guard and the recovery check (a unit test cannot see th
     assert.match(src, /isStalled\(/, 'the health check must use readiness.js');
     assert.match(src, /foldStall\(stalls, isStalled\(/, 'a recovery must require two consecutive stalls');
     assert.match(src, /setInterval\(\(\) => \{ void checkHealth\(\); \}/, 'the health check must be scheduled');
+});
+
+test('withTimeout: a dead tab (a promise that never settles) gives the fallback', async () => {
+    const never = new Promise(() => {});
+    assert.equal(await withTimeout(never, 20, false), false);
+    assert.equal(await withTimeout(Promise.resolve(true), 1000, false), true);
+    // a rejected probe (page closed, target gone) is a failed probe, not a crash of the health check
+    assert.equal(await withTimeout(Promise.reject(new Error('Target closed')), 1000, false), false);
+});
+
+test('foldDeadTab: one missed probe is a busy moment, two in a row restart the agent', () => {
+    let d = foldDeadTab(0, false);
+    assert.deepEqual(d, { count: 1, restart: false });
+    d = foldDeadTab(d.count, false);
+    assert.deepEqual(d, { count: 2, restart: true });
+    d = foldDeadTab(1, true);
+    assert.deepEqual(d, { count: 0, restart: false });
+});
+
+test('index.js watches a ready tab: crash event and liveness probe (2026-11-16 OOM kill)', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+    assert.match(src, /page\.on\('error', [^\n]*restartAgent\(/, 'a crashed tab must restart the agent');
+    assert.match(src, /foldDeadTab\(deadChecks, await pageAlive\(\)\)/, 'a ready tab must be probed');
+    assert.match(src, /withTimeout\(ensurePageApi\(\), LIVENESS_TIMEOUT_MS, false\)/, 'the probe must not hang');
+    assert.match(src, /process\.exit\(3\)/, 'restartAgent must exit so the engine restarts it');
 });
